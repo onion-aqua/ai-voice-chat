@@ -1,0 +1,13 @@
+# Local configuration and runtime data
+config.txt
+runtime/
+
+# Python cache and editor files
+__pycache__/
+*.py[cod]
+.vscode/
+.idea/
+
+# Operating-system files
+.DS_Store
+Thumbs.db

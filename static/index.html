@@ -1,0 +1,103 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>声语 · AI Chat</title>
+  <link rel="stylesheet" href="/static/style.css">
+</head>
+<body>
+  <main class="app-shell">
+    <aside class="sidebar">
+      <a class="brand" href="/" aria-label="新对话"><span class="brand-mark">S</span><span>LLM转TTS</span></a>
+      <button class="new-chat" id="new-chat" type="button"><span>＋</span> 新建对话</button>
+      <button class="settings-button" id="model-settings" type="button">⚙ 模型设置</button>
+
+      <section class="side-section">
+        <label for="voice-select">朗读音色</label>
+        <select id="voice-select" disabled><option>正在读取音色…</option></select>
+        <p class="voice-hint">每段文字将在音频准备完成后出现并自动播放。</p>
+      </section>
+
+      <section class="side-section speed-control">
+        <label for="speed-range">朗读速度 <output id="speed-value">1.00×</output></label>
+        <input id="speed-range" type="range" min="0.75" max="1.35" step="0.05" value="1">
+        <p class="voice-hint">新回答使用 IndexTTS2 自然语速；播放中可即时微调。</p>
+      </section>
+
+      <section class="side-section local-history">
+        <div class="local-history-heading"><label>历史对话</label><span>本机</span></div>
+        <nav id="conversation-list" class="conversation-list" aria-label="已保存的对话">
+          <p class="history-empty">暂无历史对话</p>
+        </nav>
+      </section>
+
+      <section class="side-section status-card">
+        <span class="status-dot" id="status-dot"></span>
+        <div><strong id="status-title">检查服务中</strong><p id="status-text">正在连接本地服务…</p></div>
+      </section>
+      <p class="privacy-note">语音合成在本机的 IndexTTS2 模型中完成。</p>
+    </aside>
+
+    <section class="chat-panel">
+      <header class="chat-header">
+        <div><p class="eyebrow">VOICE-ALIGNED CHAT</p><h1 id="conversation-title">新的对话</h1></div>
+        <button id="mute-button" class="icon-button" type="button" title="暂停自动播放">🔊</button>
+      </header>
+
+      <div id="messages" class="messages" aria-live="polite">
+        <article class="welcome">
+          <span class="welcome-icon">✦</span>
+          <h2>你好，我是声语</h2>
+          <p>提问后，我会先为每一句准备好指定音色的语音，再同时展示文字并开始朗读。</p>
+          <div class="suggestions">
+            <button type="button">用简单的话解释什么是量子计算</button>
+            <button type="button">帮我制定一个周末杭州旅行计划</button>
+            <button type="button">写一段温暖的晚安文案</button>
+          </div>
+        </article>
+      </div>
+
+      <form id="composer" class="composer">
+        <div id="tts-progress" class="tts-progress" hidden aria-live="polite">
+          <div class="tts-progress-meta"><span id="tts-progress-label">语音准备中</span><span id="tts-progress-count"></span></div>
+          <div class="tts-progress-track"><span id="tts-progress-fill"></span></div>
+        </div>
+        <div id="attachment-list" class="attachment-list" hidden aria-live="polite"></div>
+        <div class="composer-row">
+          <textarea id="prompt" rows="1" maxlength="4000" placeholder="输入你想问的问题…" aria-label="输入问题"></textarea>
+          <input id="file-input" type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.json,.log,.ini,.yaml,.yml,.xml,.py,.js,.ts,.html,.css,.sql,.java,.c,.cpp,.h,.hpp,.sh,.ps1,.bat,.cmd,.pdf,.docx">
+          <button id="attach-button" class="composer-tool" type="button" title="上传图片或文件">附件</button>
+          <button id="web-search-button" class="composer-tool web-search-button" type="button" aria-pressed="false" title="开启或关闭联网搜索">联网</button>
+          <button id="thinking-button" class="thinking-button" type="button" aria-pressed="false" title="开启或关闭思考模式">思考</button>
+          <button id="send" class="send-button" type="submit" disabled><span>发送</span><kbd>↵</kbd></button>
+        </div>
+        <p>Enter 发送 · Shift + Enter 换行 · 单个附件最大 10 MB</p>
+      </form>
+    </section>
+
+  </main>
+  <div id="settings-modal" class="settings-modal" hidden>
+    <div class="settings-backdrop" data-close-settings></div>
+    <section class="settings-card" role="dialog" aria-modal="true" aria-labelledby="settings-title">
+      <header class="settings-header">
+        <div><p class="eyebrow">MODEL CONNECTION</p><h2 id="settings-title">模型设置</h2></div>
+        <button id="close-settings" class="settings-close" type="button" aria-label="关闭设置">×</button>
+      </header>
+      <p id="settings-source" class="settings-source"></p>
+      <div class="settings-grid">
+        <label>接口类型
+          <select id="web-provider"><option value="openai_compatible">OpenAI 兼容接口</option><option value="lm_studio">LM Studio</option></select>
+        </label>
+        <label>模型名称<input id="web-model" type="text" autocomplete="off" placeholder="例如 qwen3.5"></label>
+        <label class="settings-wide">Base URL<input id="web-base-url" type="url" autocomplete="url" placeholder="http://127.0.0.1:1234/v1"></label>
+        <label class="settings-wide">API Key<input id="web-api-key" type="password" autocomplete="off" placeholder="配置文件已设置时可留空"></label>
+      </div>
+      <div class="settings-options"><button id="force-web-config" class="force-web-config" type="button" aria-pressed="false">强制使用网页配置</button></div>
+      <p class="settings-help">默认优先读取 config.txt；点击右侧按钮后，本次页面填写的接口设置将强制生效。API Key 不会回显或写入配置文件。</p>
+      <footer class="settings-footer"><button id="save-settings" class="save-settings" type="button">保存本页设置</button></footer>
+    </section>
+  </div>
+  <script src="/static/app.js"></script>
+</body>
+</html>

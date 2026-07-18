@@ -1,0 +1,5 @@
+# 已安装到 IndexTTS2 自带的 build_venv 环境
+langchain-openai>=1,<2
+httpx[socks]>=0.28,<0.29
+pypdf>=5,<6
+python-docx>=1,<2
