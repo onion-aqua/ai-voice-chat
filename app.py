@@ -797,6 +797,10 @@ async def log_http_request(request, call_next):
     except Exception:
         LOGGER.exception("[HTTP] %s %s failed", request.method, request.url.path)
         raise
+    if request.url.path == "/" or request.url.path.startswith("/static/"):
+        # The app is launched locally and updated in place.  Do not let an old
+        # cached index.html or app.js hide a newly added front-end feature.
+        response.headers["Cache-Control"] = "no-store, max-age=0"
     elapsed_ms = (time.perf_counter() - started_at) * 1000
     LOGGER.info("[HTTP] %s %s -> %s (%.0f ms)", request.method, request.url.path, response.status_code, elapsed_ms)
     return response
