@@ -77,10 +77,15 @@ let live2dBaseScale = 1;
 let live2dZoom = 1;
 let live2dOffset = {x: 0, y: 0};
 let live2dDrag = null;
+let live2dMotionGroups = {};
+let live2dLastExpressionName = '';
+let live2dLastMotionIndex = -1;
+let live2dLastMotionAt = 0;
 
 const LIVE2D_ZOOM_MIN = 0.55;
 const LIVE2D_ZOOM_MAX = 2.8;
 const NARRATION_LINE_PAUSE_MS = 260;
+const LIVE2D_SPEAKING_MOTION_COOLDOWN_MS = 1800;
 
 const LIVE2D_EMOTIONS = {
   calm: {label: '平静待机', icon: '◌', keywords: ['托脸', '喝饮料', '猫猫嘴']},
@@ -91,6 +96,16 @@ const LIVE2D_EMOTIONS = {
   disgust: {label: '克制朗读', icon: '◇', keywords: ['撅嘴']},
   depression: {label: '忧郁朗读', icon: '◒', keywords: ['托脸', '哭']},
   surprise: {label: '惊喜朗读', icon: '✧', keywords: ['星星', '帽子']},
+};
+const LIVE2D_SPEAKING_MOTION_KEYWORDS = {
+  calm: ['摊手'],
+  joy: ['变芒', '摊手'],
+  anger: ['变荒'],
+  sadness: ['变荒'],
+  fear: ['变荒'],
+  disgust: ['变荒'],
+  depression: ['变荒'],
+  surprise: ['变芒', '摊手'],
 };
 
 function unlockAudio() {
@@ -625,6 +640,7 @@ function stopNarrationPlayback() {
     narrationPauseTimer = null;
   }
   lastNarrationEndedAt = 0;
+  live2dLastMotionAt = 0;
   currentAudio?.pause();
   removeHighlights(currentNarration);
   audioQueue.forEach((narration) => {
@@ -862,15 +878,44 @@ function applyLive2DExpression(vector, force = false) {
   if (live2dEmotionLabel) live2dEmotionLabel.textContent = emotion.label;
   if (!live2dModel || (!force && emotionKey === live2dExpression)) return;
   live2dExpression = emotionKey;
-  const expressionName = emotion.keywords
-    .map((keyword) => live2dExpressionNames.find((name) => name.includes(keyword)))
-    .find(Boolean)
-    || live2dExpressionNames[Object.keys(LIVE2D_EMOTIONS).indexOf(emotionKey) % Math.max(1, live2dExpressionNames.length)];
+  const matchingExpressions = live2dExpressionNames.filter((name) => emotion.keywords.some((keyword) => name.includes(keyword)));
+  const fallbackExpression = live2dExpressionNames[Object.keys(LIVE2D_EMOTIONS).indexOf(emotionKey) % Math.max(1, live2dExpressionNames.length)];
+  const expressionCandidates = matchingExpressions.length ? matchingExpressions : [fallbackExpression].filter(Boolean);
+  const alternatives = expressionCandidates.length > 1
+    ? expressionCandidates.filter((name) => name !== live2dLastExpressionName)
+    : expressionCandidates;
+  const expressionName = alternatives[Math.floor(Math.random() * alternatives.length)];
   if (!expressionName) return;
+  live2dLastExpressionName = expressionName;
   try {
     Promise.resolve(live2dModel.expression(expressionName)).catch(() => {});
   } catch (_) {
     // Keep the demo usable with a model whose expression was rejected.
+  }
+}
+
+function triggerLive2DSpeakingMotion(vector) {
+  if (!live2dModel?.motion) return;
+  const manualMotions = Array.isArray(live2dMotionGroups.Manual) ? live2dMotionGroups.Manual : [];
+  if (!manualMotions.length || performance.now() - live2dLastMotionAt < LIVE2D_SPEAKING_MOTION_COOLDOWN_MS) return;
+  const emotionKey = live2dEmotionForVector(vector);
+  const keywords = LIVE2D_SPEAKING_MOTION_KEYWORDS[emotionKey] || [];
+  const matchingIndices = manualMotions
+    .map((name, index) => ({name, index}))
+    .filter(({name}) => keywords.some((keyword) => name.includes(keyword)))
+    .map(({index}) => index);
+  const candidates = matchingIndices.length ? matchingIndices : manualMotions.map((_, index) => index);
+  const alternatives = candidates.length > 1 ? candidates.filter((index) => index !== live2dLastMotionIndex) : candidates;
+  const motionIndex = alternatives[Math.floor(Math.random() * alternatives.length)];
+  if (!Number.isInteger(motionIndex)) return;
+  live2dLastMotionAt = performance.now();
+  live2dLastMotionIndex = motionIndex;
+  try {
+    Promise.resolve(live2dModel.motion('Manual', motionIndex)).catch((error) => {
+      console.warn('[Live2D] speaking motion was rejected.', error);
+    });
+  } catch (error) {
+    console.warn('[Live2D] speaking motion could not start.', error);
   }
 }
 
@@ -879,6 +924,7 @@ function setLive2DPlaybackState(speaking, vector = null) {
   live2dPanel?.classList.toggle('is-speaking', live2dSpeaking);
   if (live2dSpeaking) {
     applyLive2DExpression(vector, true);
+    triggerLive2DSpeakingMotion(vector);
     setLive2DStatus('朗读同步', 'speaking');
     return;
   }
@@ -1027,6 +1073,7 @@ async function initializeLive2D() {
     live2dApp = app;
     live2dModel = model;
     live2dExpressionNames = Array.isArray(localModel.expressions) ? localModel.expressions : [];
+    live2dMotionGroups = localModel.motion_groups && typeof localModel.motion_groups === 'object' ? localModel.motion_groups : {};
     live2dNaturalSize = {width: Math.max(1, model.width), height: Math.max(1, model.height)};
     const observer = new ResizeObserver(resizeLive2D);
     observer.observe(live2dStage);

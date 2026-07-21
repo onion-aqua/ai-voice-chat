@@ -847,11 +847,21 @@ def local_live2d_models() -> list[dict[str, object]]:
             LOGGER.warning("[Live2D] skipped invalid model %s: %s", relative_path, exc)
             continue
         expressions = [item.get("Name") for item in definition.get("FileReferences", {}).get("Expressions", [])]
+        motion_groups = {}
+        for group_name, group_motions in definition.get("FileReferences", {}).get("Motions", {}).items():
+            names = []
+            for motion in group_motions:
+                if not isinstance(motion, dict) or not isinstance(motion.get("File"), str):
+                    continue
+                names.append(Path(motion["File"]).name.removesuffix(".motion3.json"))
+            if names:
+                motion_groups[group_name] = names
         models.append({
             "id": relative_path.as_posix(),
             "name": model_path.parent.name,
             "url": "/live2dmodels/" + quote(relative_path.as_posix()),
             "expressions": [name for name in expressions if isinstance(name, str)],
+            "motion_groups": motion_groups,
         })
     return models
 
