@@ -71,6 +71,13 @@ let live2dExpression = 'calm';
 let live2dNaturalSize = null;
 let live2dExpressionNames = [];
 let live2dPluginRegistered = false;
+let live2dBaseScale = 1;
+let live2dZoom = 1;
+let live2dOffset = {x: 0, y: 0};
+let live2dDrag = null;
+
+const LIVE2D_ZOOM_MIN = 0.55;
+const LIVE2D_ZOOM_MAX = 2.8;
 
 const LIVE2D_EMOTIONS = {
   calm: {label: '平静待机', icon: '◌', keywords: ['托脸', '喝饮料', '猫猫嘴']},
@@ -872,15 +879,87 @@ function setLive2DPlaybackState(speaking, vector = null) {
   setLive2DStatus(live2dModel ? '待机' : '加载中', live2dModel ? 'ready' : 'loading');
 }
 
-function resizeLive2D() {
+function clampLive2DValue(value, min, max) {
+  return Math.max(min, Math.min(max, value));
+}
+
+function clampLive2DOffset(width, height) {
+  const modelWidth = live2dNaturalSize.width * live2dBaseScale * live2dZoom;
+  const modelHeight = live2dNaturalSize.height * live2dBaseScale * live2dZoom;
+  const maxX = Math.max(width * 0.42, (modelWidth - width) / 2 + width * 0.22);
+  const maxY = Math.max(height * 0.38, (modelHeight - height) * 0.34 + height * 0.18);
+  live2dOffset.x = clampLive2DValue(live2dOffset.x, -maxX, maxX);
+  live2dOffset.y = clampLive2DValue(live2dOffset.y, -maxY, maxY);
+}
+
+function applyLive2DTransform() {
   if (!live2dApp || !live2dModel || !live2dStage || !live2dNaturalSize) return;
   const width = Math.max(1, Math.floor(live2dStage.clientWidth));
   const height = Math.max(1, Math.floor(live2dStage.clientHeight));
-  live2dApp.renderer.resize(width, height);
-  const scale = Math.min(width * 0.92 / live2dNaturalSize.width, height * 0.96 / live2dNaturalSize.height);
-  live2dModel.scale.set(scale);
-  live2dModel.x = width / 2;
-  live2dModel.y = height * 1.02;
+  live2dBaseScale = Math.min(width * 0.92 / live2dNaturalSize.width, height * 0.96 / live2dNaturalSize.height);
+  clampLive2DOffset(width, height);
+  live2dModel.scale.set(live2dBaseScale * live2dZoom);
+  live2dModel.x = width / 2 + live2dOffset.x;
+  live2dModel.y = height * 1.02 + live2dOffset.y;
+}
+
+function resizeLive2D() {
+  if (!live2dApp || !live2dModel || !live2dStage || !live2dNaturalSize) return;
+  live2dApp.renderer.resize(
+    Math.max(1, Math.floor(live2dStage.clientWidth)),
+    Math.max(1, Math.floor(live2dStage.clientHeight)),
+  );
+  applyLive2DTransform();
+}
+
+function setupLive2DControls() {
+  if (!live2dCanvas || !live2dStage) return;
+  const pointerPosition = (event) => {
+    const bounds = live2dCanvas.getBoundingClientRect();
+    return {x: event.clientX - bounds.left, y: event.clientY - bounds.top};
+  };
+  const finishDrag = (event) => {
+    if (!live2dDrag || event.pointerId !== live2dDrag.pointerId) return;
+    live2dDrag = null;
+    live2dStage.classList.remove('is-dragging');
+    if (live2dCanvas.hasPointerCapture?.(event.pointerId)) {
+      live2dCanvas.releasePointerCapture(event.pointerId);
+    }
+  };
+
+  live2dCanvas.addEventListener('pointerdown', (event) => {
+    if (event.button !== 0 || !live2dModel) return;
+    const point = pointerPosition(event);
+    live2dDrag = {pointerId: event.pointerId, startX: point.x, startY: point.y, offsetX: live2dOffset.x, offsetY: live2dOffset.y};
+    live2dCanvas.setPointerCapture?.(event.pointerId);
+    live2dStage.classList.add('is-dragging');
+    event.preventDefault();
+  });
+  live2dCanvas.addEventListener('pointermove', (event) => {
+    if (!live2dDrag || event.pointerId !== live2dDrag.pointerId) return;
+    const point = pointerPosition(event);
+    live2dOffset.x = live2dDrag.offsetX + point.x - live2dDrag.startX;
+    live2dOffset.y = live2dDrag.offsetY + point.y - live2dDrag.startY;
+    applyLive2DTransform();
+  });
+  live2dCanvas.addEventListener('pointerup', finishDrag);
+  live2dCanvas.addEventListener('pointercancel', finishDrag);
+  live2dCanvas.addEventListener('wheel', (event) => {
+    if (!live2dModel) return;
+    event.preventDefault();
+    const previousZoom = live2dZoom;
+    const nextZoom = clampLive2DValue(previousZoom * Math.exp(-event.deltaY * 0.0015), LIVE2D_ZOOM_MIN, LIVE2D_ZOOM_MAX);
+    if (nextZoom === previousZoom) return;
+    const point = pointerPosition(event);
+    const width = Math.max(1, live2dStage.clientWidth);
+    const height = Math.max(1, live2dStage.clientHeight);
+    const scaleRatio = nextZoom / previousZoom;
+    live2dOffset.x = point.x - (point.x - (width / 2 + live2dOffset.x)) * scaleRatio - width / 2;
+    live2dOffset.y = point.y - (point.y - (height * 1.02 + live2dOffset.y)) * scaleRatio - height * 1.02;
+    live2dZoom = nextZoom;
+    applyLive2DTransform();
+  }, {passive: false});
+  console.info('[Live2D] drag to move; use the mouse wheel to zoom.');
 }
 
 function updateLive2DMouthFromAudio() {
@@ -945,6 +1024,7 @@ async function initializeLive2D() {
     observer.observe(live2dStage);
     app.ticker.add(updateLive2DMouthFromAudio);
     resizeLive2D();
+    setupLive2DControls();
     applyLive2DExpression(null, true);
     live2dFallback.hidden = true;
     setLive2DStatus('待机', 'ready');
