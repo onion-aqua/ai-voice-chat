@@ -75,6 +75,29 @@
       </form>
     </section>
 
+    <aside class="live2d-panel" aria-labelledby="live2d-heading">
+      <header class="live2d-header">
+        <div>
+          <p class="eyebrow">LIVE2D DEMO</p>
+          <h2 id="live2d-heading">朗读助手</h2>
+        </div>
+        <span id="live2d-state" class="live2d-state" data-state="loading">加载中</span>
+      </header>
+      <div id="live2d-stage" class="live2d-stage" aria-live="polite">
+        <canvas id="live2d-canvas" aria-label="Live2D 朗读助手"></canvas>
+        <div id="live2d-fallback" class="live2d-fallback">
+          <span class="live2d-fallback-mark">✦</span>
+          <strong>正在加载演示模型</strong>
+          <p>模型会随 IndexTTS2 朗读同步切换状态和表情。</p>
+        </div>
+      </div>
+      <section class="live2d-emotion-card" aria-label="当前朗读情绪">
+        <span class="live2d-emotion-icon" id="live2d-emotion-icon">◌</span>
+        <div><small>当前朗读情绪</small><strong id="live2d-emotion-label">平静待机</strong></div>
+      </section>
+      <p class="live2d-note">演示使用公开的 Live2D 示例模型；后续可替换为你自己的授权模型文件。</p>
+    </aside>
+
   </main>
   <div id="settings-modal" class="settings-modal" hidden>
     <div class="settings-backdrop" data-close-settings></div>
@@ -105,6 +128,9 @@
       <footer class="settings-footer"><button id="save-settings" class="save-settings" type="button">保存本页设置</button></footer>
     </section>
   </div>
-  <script src="/static/app.js?v=20260719-agent-default-tools"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js" crossorigin="anonymous"></script>
+  <script defer src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js" crossorigin="anonymous"></script>
+  <script defer src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js" crossorigin="anonymous"></script>
+  <script defer src="/static/app.js?v=20260721-live2d-demo"></script>
 </body>
 </html>

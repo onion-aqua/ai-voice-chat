@@ -33,6 +33,13 @@ const forceWebConfigButton = document.querySelector('#force-web-config');
 const ttsProgress = document.querySelector('#tts-progress');
 const ttsProgressLabel = document.querySelector('#tts-progress-label');
 const ttsProgressCount = document.querySelector('#tts-progress-count');
+const live2dPanel = document.querySelector('.live2d-panel');
+const live2dStage = document.querySelector('#live2d-stage');
+const live2dCanvas = document.querySelector('#live2d-canvas');
+const live2dFallback = document.querySelector('#live2d-fallback');
+const live2dState = document.querySelector('#live2d-state');
+const live2dEmotionIcon = document.querySelector('#live2d-emotion-icon');
+const live2dEmotionLabel = document.querySelector('#live2d-emotion-label');
 
 let history = [];
 let conversationId = null;
@@ -57,6 +64,23 @@ let pendingAttachments = [];
 let attachmentUploadInProgress = false;
 let locationContext = null;
 let locationRequestInFlight = false;
+let live2dApp = null;
+let live2dModel = null;
+let live2dSpeaking = false;
+let live2dExpression = 'calm';
+let live2dNaturalSize = null;
+
+const LIVE2D_MODEL_URL = 'https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display@master/test/assets/haru/haru_greeter_t03.model3.json';
+const LIVE2D_EMOTIONS = {
+  calm: {label: '平静待机', icon: '◌', expression: 'f00'},
+  joy: {label: '开心朗读', icon: '✦', expression: 'f03'},
+  anger: {label: '坚定朗读', icon: '◆', expression: 'f04'},
+  sadness: {label: '低落朗读', icon: '◔', expression: 'f06'},
+  fear: {label: '紧张朗读', icon: '△', expression: 'f02'},
+  disgust: {label: '克制朗读', icon: '◇', expression: 'f05'},
+  depression: {label: '忧郁朗读', icon: '◒', expression: 'f06'},
+  surprise: {label: '惊喜朗读', icon: '✧', expression: 'f07'},
+};
 
 function unlockAudio() {
   if (audioWasUnlocked) return;
@@ -596,6 +620,7 @@ function stopNarrationPlayback() {
   currentNarration = null;
   waitingForInitialNarration = false;
   narrationStarted = false;
+  setLive2DPlaybackState(false);
 }
 
 function renderSavedConversation(savedMessages) {
@@ -755,7 +780,7 @@ function createAssistantView() {
   answer.className = 'answer-content waiting';
   answer.textContent = '正在生成回答…';
   bubble.append(agent, thinking, answer);
-  return {bubble, agent, agentSummary, agentList, agentSteps: 0, agentItems: new Map(), thinking, summary, thinkingText, answer, search: null, generatedImage: null, lines: new Map()};
+  return {bubble, agent, agentSummary, agentList, agentSteps: 0, agentItems: new Map(), thinking, summary, thinkingText, answer, search: null, generatedImage: null, lines: new Map(), emotionVectors: new Map()};
 }
 
 function removeHighlights(narration) {
@@ -779,6 +804,134 @@ function updateLineHighlight() {
   followNarrationLine(lineElements[index]);
 }
 
+function normalizedEmotionVector(vector) {
+  const fallback = [0, 0, 0, 0, 0, 0, 0, 0.6];
+  if (!Array.isArray(vector) || vector.length !== 8) return fallback;
+  return vector.map((value, index) => {
+    const number = Number(value);
+    return Number.isFinite(number) ? Math.max(0, Math.min(1, number)) : fallback[index];
+  });
+}
+
+function live2dEmotionForVector(vector) {
+  const values = normalizedEmotionVector(vector);
+  const keys = ['joy', 'anger', 'sadness', 'fear', 'disgust', 'depression', 'surprise'];
+  let strongestIndex = 0;
+  for (let index = 1; index < keys.length; index += 1) {
+    if (values[index] > values[strongestIndex]) strongestIndex = index;
+  }
+  return values[strongestIndex] >= 0.14 ? keys[strongestIndex] : 'calm';
+}
+
+function setLive2DStatus(text, state = 'ready') {
+  if (!live2dState) return;
+  live2dState.textContent = text;
+  live2dState.dataset.state = state;
+}
+
+function setLive2DMouth(openAmount = 0) {
+  const coreModel = live2dModel?.internalModel?.coreModel;
+  if (!coreModel?.setParameterValueById) return;
+  try {
+    coreModel.setParameterValueById('ParamMouthOpenY', Math.max(0, Math.min(1, openAmount)));
+  } catch (_) {
+    // Different Live2D models may not expose the standard mouth parameter.
+  }
+}
+
+function applyLive2DExpression(vector, force = false) {
+  const emotionKey = live2dEmotionForVector(vector);
+  const emotion = LIVE2D_EMOTIONS[emotionKey];
+  if (live2dEmotionIcon) live2dEmotionIcon.textContent = emotion.icon;
+  if (live2dEmotionLabel) live2dEmotionLabel.textContent = emotion.label;
+  if (!live2dModel || (!force && emotionKey === live2dExpression)) return;
+  live2dExpression = emotionKey;
+  try {
+    Promise.resolve(live2dModel.expression(emotion.expression)).catch(() => {});
+  } catch (_) {
+    // Keep the demo usable with models that do not define the sample expressions.
+  }
+}
+
+function setLive2DPlaybackState(speaking, vector = null) {
+  live2dSpeaking = Boolean(speaking);
+  live2dPanel?.classList.toggle('is-speaking', live2dSpeaking);
+  if (live2dSpeaking) {
+    applyLive2DExpression(vector, true);
+    setLive2DStatus('朗读同步', 'speaking');
+    return;
+  }
+  setLive2DMouth(0);
+  applyLive2DExpression(null, true);
+  setLive2DStatus(live2dModel ? '待机' : '加载中', live2dModel ? 'ready' : 'loading');
+}
+
+function resizeLive2D() {
+  if (!live2dApp || !live2dModel || !live2dStage || !live2dNaturalSize) return;
+  const width = Math.max(1, Math.floor(live2dStage.clientWidth));
+  const height = Math.max(1, Math.floor(live2dStage.clientHeight));
+  live2dApp.renderer.resize(width, height);
+  const scale = Math.min(width * 0.92 / live2dNaturalSize.width, height * 0.96 / live2dNaturalSize.height);
+  live2dModel.scale.set(scale);
+  live2dModel.x = width / 2;
+  live2dModel.y = height * 1.02;
+}
+
+function updateLive2DMouthFromAudio() {
+  if (!live2dSpeaking || !currentAudio || currentAudio.paused) {
+    setLive2DMouth(0);
+    return;
+  }
+  // IndexTTS2 audio does not expose waveform samples to the browser.  A short,
+  // deterministic mouth motion keeps the model visually aligned with speech
+  // without adding another audio-processing dependency to this demo.
+  const wave = (Math.sin(currentAudio.currentTime * 21) + 1) / 2;
+  setLive2DMouth(0.16 + wave * 0.52);
+}
+
+async function initializeLive2D() {
+  if (!live2dCanvas || !live2dStage) return;
+  const Live2DModel = window.PIXI?.live2d?.Live2DModel;
+  if (!window.PIXI || !Live2DModel || !window.Live2DCubismCore) {
+    setLive2DStatus('不可用', 'error');
+    if (live2dFallback) {
+      live2dFallback.querySelector('strong').textContent = 'Live2D 演示资源未加载';
+      live2dFallback.querySelector('p').textContent = '请检查网络是否可访问 jsDelivr 与 Live2D CDN。';
+    }
+    return;
+  }
+  try {
+    const app = new window.PIXI.Application({
+      view: live2dCanvas,
+      autoStart: true,
+      antialias: true,
+      backgroundAlpha: 0,
+      autoDensity: true,
+      resolution: Math.min(window.devicePixelRatio || 1, 2),
+    });
+    const model = await Live2DModel.from(LIVE2D_MODEL_URL, {autoInteract: false});
+    model.anchor.set(0.5, 1);
+    app.stage.addChild(model);
+    live2dApp = app;
+    live2dModel = model;
+    live2dNaturalSize = {width: Math.max(1, model.width), height: Math.max(1, model.height)};
+    const observer = new ResizeObserver(resizeLive2D);
+    observer.observe(live2dStage);
+    app.ticker.add(updateLive2DMouthFromAudio);
+    resizeLive2D();
+    applyLive2DExpression(null, true);
+    live2dFallback.hidden = true;
+    setLive2DStatus('待机', 'ready');
+  } catch (error) {
+    console.warn('Live2D demo failed to load.', error);
+    setLive2DStatus('加载失败', 'error');
+    if (live2dFallback) {
+      live2dFallback.querySelector('strong').textContent = 'Live2D 演示模型加载失败';
+      live2dFallback.querySelector('p').textContent = '不影响聊天和朗读；请检查网络或稍后刷新页面。';
+    }
+  }
+}
+
 function playNextNarration() {
   if (isMuted || currentAudio || audioQueue.length === 0) return;
   if (!narrationStarted && waitingForInitialNarration && audioQueue.length < playbackPrebufferSegments) {
@@ -799,6 +952,7 @@ function playNextNarration() {
   audio.addEventListener('play', () => {
     narrationStarted = true;
     setStatus('正在朗读', '高亮行会随连续语音同步移动。', 'speaking');
+    setLive2DPlaybackState(true, narration.emotionVector);
     updateLineHighlight();
   });
   audio.addEventListener('ended', () => {
@@ -806,25 +960,32 @@ function playNextNarration() {
     currentAudio = null;
     currentNarration = null;
     playNextNarration();
-    if (!audioQueue.length && !isBusy) setStatus('准备就绪', '本轮语音已播放完毕。');
+    if (!audioQueue.length) {
+      setLive2DPlaybackState(false);
+      if (!isBusy) setStatus('准备就绪', '本轮语音已播放完毕。');
+    }
   });
   audio.addEventListener('error', () => {
     removeHighlights(narration);
     currentAudio = null;
     currentNarration = null;
+    if (!audioQueue.length) setLive2DPlaybackState(false);
     setStatus('播放失败', '音频文件无法播放，请重试。', 'error');
     playNextNarration();
   });
   audio.play().catch(() => setStatus('等待播放许可', '请点击页面任意位置后继续播放。', 'error'));
 }
 
-function queueNarration(url, lineElements, speakingSpeed) {
+function queueNarration(url, lineElements, speakingSpeed, emotionVector) {
   const weights = lineElements.map((line) => Math.max(1, line.textContent.replace(/\s/g, '').length));
   const audio = new Audio();
   audio.preload = 'auto';
   audio.src = url;
   audio.load();
-  audioQueue.push({audio, lineElements, speakingSpeed, weights, totalWeight: weights.reduce((total, value) => total + value, 0), activeIndex: -1});
+  audioQueue.push({
+    audio, lineElements, speakingSpeed, emotionVector: normalizedEmotionVector(emotionVector),
+    weights, totalWeight: weights.reduce((total, value) => total + value, 0), activeIndex: -1,
+  });
   playNextNarration();
 }
 
@@ -1043,12 +1204,14 @@ async function ask(message, attachments = []) {
           fullAnswer = fullAnswer ? `${fullAnswer}\n${data.text}` : data.text;
           const vector = Array.isArray(data.emotion_vector) && data.emotion_vector.length === 8
             ? data.emotion_vector : [0, 0, 0, 0, 0, 0, 0, 0.6];
+          activeAssistant.emotionVectors.set(String(data.line_id), vector);
           const historyLine = `${data.text}&&${JSON.stringify(vector)}`;
           answerForModel = answerForModel ? `${answerForModel}\n${historyLine}` : historyLine;
           if (!activeAssistant.thinking.hidden) activeAssistant.summary.textContent = '思考过程（点击展开）';
         } else if (event === 'audio') {
           const lines = appendSpeechLines(activeAssistant, data.lines, data.text, data.line_id);
-          if (lines.length) queueNarration(data.audio, lines, data.speaking_speed || 1);
+          const emotionVector = activeAssistant.emotionVectors.get(String(data.line_id));
+          if (lines.length) queueNarration(data.audio, lines, data.speaking_speed || 1, emotionVector);
         } else if (event === 'tts_progress') {
           showTtsProgress(data);
         } else if (event === 'tts_error') {
@@ -1199,7 +1362,10 @@ muteButton.addEventListener('click', () => {
   isMuted = !isMuted;
   muteButton.textContent = isMuted ? '🔇' : '🔊';
   muteButton.title = isMuted ? '恢复自动播放' : '暂停自动播放';
-  if (isMuted) currentAudio?.pause();
+  if (isMuted) {
+    currentAudio?.pause();
+    setLive2DPlaybackState(false);
+  }
   else if (currentAudio) currentAudio.play().catch(() => {});
   else playNextNarration();
 });
@@ -1208,6 +1374,7 @@ document.addEventListener('click', () => {
   else playNextNarration();
 });
 initialize();
+void initializeLive2D();
 updateSpeedLabel();
 renderAttachmentList();
 updateSendButton();
