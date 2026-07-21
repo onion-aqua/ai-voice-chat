@@ -41,8 +41,37 @@ LM Studio 不验证 API 密钥时，程序会自动给 LangChain 使用内部占
 
 `base_url` 必须是 API 根路径，通常需包含 `/v1`，例如 `https://api.deepseek.com/v1`。`config.txt` 同时集中维护 IndexTTS2 项目目录、默认音色和本地端口；改完后重启程序生效。依赖清单在 `requirements.txt`，当前已经安装到 IndexTTS2 自带的 `build_venv`。
 
+## API 画图
+
+点击输入框旁的“画图”即可切换模式。画图模式下发送的文字会提交到 OpenAI 兼容的 `POST /images/generations` 接口，生成结果直接显示在对话中，不进入 TTS 队列。
+
+画图不会再复用聊天模型。默认 `model = auto` 会从当前 API 的 `/models` 中识别并选择可用的最新图片模型；如果服务商没有开放模型列表，请在 `[image]` 中填写专用图片模型。聊天接口和图片接口可以共用 `base_url`、API Key，但模型必须独立。若某个兼容服务把图片生成实现为 Responses API 的 `image_generation` 工具，程序会在检测到对应协议错误后自动切换。
+
+```ini
+[image]
+api_key = your-image-api-key
+base_url = https://your-image-api.example/v1
+model = auto
+size = 1024x1024
+```
+
+未填写 `image.api_key` 时，程序会复用 `[chat]` 的 `api_key`。OpenAI 可填写 `gpt-image-1.5`；Gemini 的 OpenAI 兼容接口可填写 `gemini-3.1-flash-image`。其他兼容服务请以其 `/models` 返回的图片模型为准；不要填写 `gpt-5.6`、Qwen 聊天模型等文字模型。
+
+也可以在网页左侧的“模型设置”卡片中填写图片模型、图片 Base URL 和图片 API Key。默认仍优先使用 `config.txt`；点击“强制使用网页配置”后，聊天和画图都会改用本页填写的配置。
+
+## 自动工具调用
+
+聊天模型支持 OpenAI 风格的 function calling / tool calling 时，普通聊天中会自行决定是否调用联网搜索或图片生成工具：需要最新资料时搜索；用户明确要求创作图片时画图。工具结果会显示在对话区，并自动回传给模型继续组织最终回答和语音。
+
+## 智能体模式
+
+输入框旁的“智能体”默认开启。开启后，模型会自主规划并循环调用工具，页面会在回复中显示可折叠的执行记录；单轮最多执行 10 个工具步骤、10 次联网搜索和 10 次画图。关闭后回到普通聊天，但“联网”和“画图”手动按钮仍然可用。
+
+输入框旁的“联网”和“画图”按钮仍可用，分别用于手动强制搜索或直接画图；不开启时由模型自主决定。
+
 ## 技术说明
 
 - IndexTTS2 首次合成会加载约 4.6GB 模型，RTX 5090  可正常承载；首次响应会明显较慢。
 - 当前一次只进行一个语音合成任务，以避免多个请求同时抢占模型和显存。
-- 生成音频保存于 `runtime/audio/`，可按需手工清理。
+- 生成音频保存于 `runtime/audio/`，程序会自动只保留最新 10 个 `.wav` 文件。
+- 使用 `start.bat` 启动时，HTTP 请求、模型与工具调用、TTS、图片接口和异常堆栈都会直接打印在 CMD 中；不会打印 API Key 或对话正文。

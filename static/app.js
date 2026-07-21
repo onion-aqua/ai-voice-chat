@@ -20,10 +20,14 @@ const webProvider = document.querySelector('#web-provider');
 const webModel = document.querySelector('#web-model');
 const webBaseUrl = document.querySelector('#web-base-url');
 const webApiKey = document.querySelector('#web-api-key');
+const webImageModel = document.querySelector('#web-image-model');
+const webImageApiMode = document.querySelector('#web-image-api-mode');
+const webImageResponsesModel = document.querySelector('#web-image-responses-model');
+const webImageBaseUrl = document.querySelector('#web-image-base-url');
+const webImageApiKey = document.querySelector('#web-image-api-key');
 const thinkingButton = document.querySelector('#thinking-button');
 const fileInput = document.querySelector('#file-input');
 const attachButton = document.querySelector('#attach-button');
-const webSearchButton = document.querySelector('#web-search-button');
 const attachmentList = document.querySelector('#attachment-list');
 const forceWebConfigButton = document.querySelector('#force-web-config');
 const ttsProgress = document.querySelector('#tts-progress');
@@ -37,6 +41,7 @@ let conversationSaveQueue = Promise.resolve();
 let pendingDeleteId = null;
 let configDefaults = {};
 let webChatSettings = {provider: 'openai_compatible', api_key: '', base_url: '', model: '', thinking: false, thinking_override: false, force_web_config: false};
+let webImageSettings = {api_key: '', base_url: '', model: 'auto', api_mode: 'auto', responses_model: '', force_web_config: false};
 let isBusy = false;
 let activeRequest = null;
 let isMuted = false;
@@ -50,7 +55,8 @@ let waitingForInitialNarration = false;
 let narrationStarted = false;
 let pendingAttachments = [];
 let attachmentUploadInProgress = false;
-let webSearchEnabled = false;
+let locationContext = null;
+let locationRequestInFlight = false;
 
 function unlockAudio() {
   if (audioWasUnlocked) return;
@@ -78,6 +84,10 @@ function readableError(error) {
 }
 
 function updateSendButton() {
+  // Keep drafting available while a response is running. The send button
+  // becomes the stop control, but the textarea itself must remain editable.
+  promptInput.disabled = false;
+  promptInput.readOnly = false;
   const label = sendButton.querySelector('span');
   const shortcut = sendButton.querySelector('kbd');
   if (isBusy) {
@@ -87,17 +97,15 @@ function updateSendButton() {
     sendButton.classList.add('is-stop');
     sendButton.title = '停止文字与语音输出';
     attachButton.disabled = true;
-    webSearchButton.disabled = true;
     thinkingButton.disabled = true;
     return;
   }
   label.textContent = '发送';
   shortcut.hidden = false;
-  sendButton.disabled = !promptInput.value.trim() || attachmentUploadInProgress;
+  sendButton.disabled = !promptInput.value.trim() || attachmentUploadInProgress || locationRequestInFlight;
   sendButton.classList.remove('is-stop');
   sendButton.title = '发送消息';
   attachButton.disabled = attachmentUploadInProgress;
-  webSearchButton.disabled = attachmentUploadInProgress;
   thinkingButton.disabled = attachmentUploadInProgress;
 }
 
@@ -107,7 +115,7 @@ function updateSettingsSource() {
   forceWebConfigButton.setAttribute('aria-pressed', String(forced));
   forceWebConfigButton.textContent = forced ? '切换回 config.txt' : '强制使用网页配置';
   settingsSource.textContent = forced
-    ? '当前会强制使用本页面填写的接口信息。'
+    ? '当前会强制使用本页面填写的聊天和画图接口信息。'
     : '默认优先读取 config.txt；其中缺失的字段会自动使用本页面填写的内容。';
 }
 
@@ -116,6 +124,11 @@ function openSettings() {
   webModel.value = webChatSettings.model;
   webBaseUrl.value = webChatSettings.base_url;
   webApiKey.value = webChatSettings.api_key;
+  webImageModel.value = webImageSettings.model;
+  webImageApiMode.value = webImageSettings.api_mode;
+  webImageResponsesModel.value = webImageSettings.responses_model;
+  webImageBaseUrl.value = webImageSettings.base_url;
+  webImageApiKey.value = webImageSettings.api_key;
   updateSettingsSource();
   settingsModal.hidden = false;
   webModel.focus();
@@ -133,11 +146,19 @@ function saveWebSettings() {
     thinking_override: webChatSettings.thinking_override,
     force_web_config: webChatSettings.force_web_config,
   };
+  webImageSettings = {
+    model: webImageModel.value.trim() || 'auto',
+    api_mode: webImageApiMode.value,
+    responses_model: webImageResponsesModel.value.trim(),
+    base_url: webImageBaseUrl.value.trim(),
+    api_key: webImageApiKey.value.trim(),
+    force_web_config: webImageSettings.force_web_config,
+  };
   closeSettings();
-  setStatus('模型设置已保存', webChatSettings.force_web_config ? '后续对话会强制使用网页配置。' : '后续对话仍优先使用 config.txt。');
+  setStatus('模型设置已保存', webChatSettings.force_web_config ? '后续聊天和画图会强制使用网页配置。' : '后续聊天和画图仍优先使用 config.txt。');
 }
 
-function applyConfigDefaults(defaults = {}) {
+function applyConfigDefaults(defaults = {}, imageDefaults = {}) {
   configDefaults = {...defaults};
   webChatSettings.provider = defaults.provider || webChatSettings.provider;
   webChatSettings.base_url = defaults.base_url || webChatSettings.base_url;
@@ -145,7 +166,13 @@ function applyConfigDefaults(defaults = {}) {
   if (typeof defaults.thinking === 'boolean') webChatSettings.thinking = defaults.thinking;
   webChatSettings.thinking_override = false;
   webChatSettings.force_web_config = false;
+  webImageSettings.base_url = imageDefaults.base_url || webImageSettings.base_url;
+  webImageSettings.model = imageDefaults.model || webImageSettings.model || 'auto';
+  webImageSettings.api_mode = imageDefaults.api_mode || webImageSettings.api_mode || 'auto';
+  webImageSettings.responses_model = imageDefaults.responses_model || webImageSettings.responses_model;
+  webImageSettings.force_web_config = false;
   webApiKey.placeholder = defaults.api_key_configured ? 'config.txt 已配置；强制网页配置时请填写' : '请输入 API Key';
+  webImageApiKey.placeholder = imageDefaults.api_key_configured ? 'config.txt 已配置；强制网页配置时请填写' : '留空则复用聊天 API Key';
   updateSettingsSource();
   updateThinkingButton();
 }
@@ -158,11 +185,40 @@ function updateThinkingButton() {
   thinkingButton.title = enabled ? '关闭思考模式' : '开启思考模式';
 }
 
-function updateWebSearchButton() {
-  webSearchButton.classList.toggle('active', webSearchEnabled);
-  webSearchButton.setAttribute('aria-pressed', String(webSearchEnabled));
-  webSearchButton.textContent = webSearchEnabled ? '联网已开' : '联网';
-  webSearchButton.title = webSearchEnabled ? '关闭联网搜索' : '开启联网搜索';
+function needsCurrentLocation(message) {
+  return /附近|周边|身边|本地|天气|温度|气温|降雨|下雨|风力|设施|公交|地铁|医院|药店|餐厅|咖啡/.test(message);
+}
+
+function requestCurrentLocation({silent = false} = {}) {
+  if (!navigator.geolocation) {
+    if (!silent) setStatus('浏览器不支持定位', '请使用支持地理位置的浏览器，或手动在消息中说明城市。', 'error');
+    return Promise.resolve(null);
+  }
+  locationRequestInFlight = true;
+  updateSendButton();
+  if (!silent) setStatus('正在请求位置授权', '位置仅用于本轮天气与附近设施查询，不会保存到对话历史。', 'working');
+  return new Promise((resolve) => {
+    navigator.geolocation.getCurrentPosition(
+      (position) => {
+        locationContext = {
+          latitude: position.coords.latitude,
+          longitude: position.coords.longitude,
+          accuracy: position.coords.accuracy || 0,
+        };
+        locationRequestInFlight = false;
+        updateSendButton();
+        if (!silent) setStatus('位置已授权', '本轮可查询当前天气、温度和附近设施。');
+        resolve(locationContext);
+      },
+      (error) => {
+        locationRequestInFlight = false;
+        updateSendButton();
+        if (!silent) setStatus('未获得位置', error.message || '已拒绝位置授权；可手动说明城市。', 'error');
+        resolve(null);
+      },
+      {enableHighAccuracy: false, timeout: 10_000, maximumAge: 5 * 60_000},
+    );
+  });
 }
 
 function formatAttachmentSize(size) {
@@ -308,6 +364,63 @@ function showSearchResults(view, data) {
   }
   view.bubble.insertBefore(panel, view.thinking);
   view.search = panel;
+}
+
+function showToolGeneratedImage(view, data) {
+  view.generatedImage?.remove();
+  const panel = document.createElement('div');
+  panel.className = 'tool-generated-image';
+  if (data.error) {
+    panel.classList.add('error-message');
+    panel.textContent = `自动画图失败：${readableError(data.error)}`;
+  } else if (data.url) {
+    const image = document.createElement('img');
+    image.className = 'generated-image';
+    image.src = data.url;
+    image.alt = '模型生成的图片';
+    image.onload = () => scrollToBottom();
+    panel.append(image);
+    if (data.revised_prompt) {
+      const note = document.createElement('p');
+      note.className = 'image-generation-note';
+      note.textContent = `优化后的提示词：${data.revised_prompt}`;
+      panel.append(note);
+    }
+  }
+  view.bubble.insertBefore(panel, view.answer);
+  view.generatedImage = panel;
+}
+
+function appendAgentStep(view, data) {
+  const labels = {web_search: '联网搜索', browse_webpage: '阅读网页', get_local_environment: '本地环境', generate_image: '生成图片'};
+  view.agent.hidden = false;
+  const state = data.state || 'running';
+  const stateText = {running: '执行中', completed: '已完成', failed: '失败', limited: '已限制'}[state] || '执行中';
+  const key = String(data.call_id || `${data.tool}:${data.detail || ''}:${view.agentSteps}`);
+  let item = view.agentItems.get(key);
+  if (!item) {
+    item = document.createElement('li');
+    view.agentItems.set(key, item);
+    view.agentList.append(item);
+    view.agentSteps += 1;
+  }
+  item.className = `agent-step ${state}`;
+  let title = item.querySelector('strong');
+  if (!title) {
+    title = document.createElement('strong');
+    item.append(title);
+  }
+  title.textContent = `${labels[data.tool] || '调用工具'} · ${stateText}`;
+  const detail = data.message && data.detail ? `${data.detail}：${data.message}` : (data.message || data.detail);
+  if (detail) {
+    let text = item.querySelector('span');
+    if (!text) {
+      text = document.createElement('span');
+      item.append(text);
+    }
+    text.textContent = String(detail);
+  }
+  view.agentSummary.textContent = `智能体执行记录（${view.agentSteps} 步，点击展开）`;
 }
 
 function showTtsProgress(data) {
@@ -487,9 +600,11 @@ function stopNarrationPlayback() {
 
 function renderSavedConversation(savedMessages) {
   messages.replaceChildren();
+  let historyIndex = 0;
   for (const item of savedMessages) {
     if (item.role === 'user') {
-      createMessage('user', item.content);
+      createMessage('user', item.content, {historyIndex});
+      historyIndex += 1;
       continue;
     }
     const bubble = createMessage('assistant');
@@ -502,6 +617,7 @@ function renderSavedConversation(savedMessages) {
       answer.append(line);
     }
     bubble.append(answer);
+    historyIndex += 1;
   }
   messages.scrollTop = 0;
 }
@@ -538,7 +654,66 @@ function followNarrationLine(line) {
   messages.scrollTo({top: Math.max(0, target), behavior: 'smooth'});
 }
 
-function createMessage(role, text = '') {
+function discardMessageFromHere(article) {
+  if (isBusy) {
+    setStatus('请先停止当前回复', '不能在模型生成或朗读期间编辑、重试历史消息。', 'error');
+    return null;
+  }
+  const historyIndex = Number(article.dataset.historyIndex);
+  if (!Number.isInteger(historyIndex) || historyIndex < 0) return null;
+  stopNarrationPlayback();
+  for (let node = article; node;) {
+    const next = node.nextElementSibling;
+    node.remove();
+    node = next;
+  }
+  history = history.slice(0, historyIndex);
+  if (history.length) queueConversationSave();
+  return String(article.dataset.userText || '').trim();
+}
+
+function retryUserMessage(article) {
+  if (article.dataset.hasAttachments === 'true') {
+    setStatus('需要重新上传附件', '带图片或文件的消息不能自动重试，请重新上传后发送。', 'error');
+    return;
+  }
+  const text = discardMessageFromHere(article);
+  if (!text) return;
+  unlockAudio();
+  ask(text);
+}
+
+function editUserMessage(article) {
+  const text = discardMessageFromHere(article);
+  if (!text) return;
+  promptInput.value = text;
+  promptInput.dispatchEvent(new Event('input'));
+  promptInput.focus();
+  setStatus('正在编辑消息', '已移除该消息及其后的回复；修改后重新发送即可。');
+}
+
+function addUserMessageActions(article) {
+  const actions = document.createElement('div');
+  actions.className = 'message-actions';
+  const retry = document.createElement('button');
+  retry.type = 'button';
+  retry.className = 'message-action';
+  retry.title = '重新发送此消息';
+  retry.setAttribute('aria-label', '重新发送此消息');
+  retry.textContent = '↻';
+  retry.addEventListener('click', () => retryUserMessage(article));
+  const edit = document.createElement('button');
+  edit.type = 'button';
+  edit.className = 'message-action';
+  edit.title = '编辑此消息';
+  edit.setAttribute('aria-label', '编辑此消息');
+  edit.textContent = '✎';
+  edit.addEventListener('click', () => editUserMessage(article));
+  actions.append(retry, edit);
+  article.append(actions);
+}
+
+function createMessage(role, text = '', options = {}) {
   const article = document.createElement('article');
   article.className = `message ${role}`;
   const label = document.createElement('div');
@@ -548,6 +723,11 @@ function createMessage(role, text = '') {
   bubble.className = 'bubble';
   bubble.textContent = text;
   article.append(label, bubble);
+  if (role === 'user') {
+    article.dataset.userText = text;
+    article.dataset.historyIndex = String(options.historyIndex ?? history.length);
+    addUserMessageActions(article);
+  }
   messages.append(article);
   scrollToBottom();
   return bubble;
@@ -555,6 +735,14 @@ function createMessage(role, text = '') {
 
 function createAssistantView() {
   const bubble = createMessage('assistant');
+  const agent = document.createElement('details');
+  agent.className = 'agent-panel';
+  agent.hidden = true;
+  const agentSummary = document.createElement('summary');
+  agentSummary.textContent = '智能体执行记录（点击展开）';
+  const agentList = document.createElement('ol');
+  agentList.className = 'agent-step-list';
+  agent.append(agentSummary, agentList);
   const thinking = document.createElement('details');
   thinking.className = 'thinking-panel';
   thinking.hidden = true;
@@ -566,8 +754,8 @@ function createAssistantView() {
   const answer = document.createElement('div');
   answer.className = 'answer-content waiting';
   answer.textContent = '正在生成回答…';
-  bubble.append(thinking, answer);
-  return {bubble, thinking, summary, thinkingText, answer, search: null, lines: new Map()};
+  bubble.append(agent, thinking, answer);
+  return {bubble, agent, agentSummary, agentList, agentSteps: 0, agentItems: new Map(), thinking, summary, thinkingText, answer, search: null, generatedImage: null, lines: new Map()};
 }
 
 function removeHighlights(narration) {
@@ -703,6 +891,7 @@ function stopActiveResponse(showStatus = true) {
   request.stopped = true;
   activeRequest = null;
   request.controller.abort();
+  request.placeholder?.parentElement?.remove();
   stopNarrationPlayback();
   hideTtsProgress();
   isBusy = false;
@@ -711,6 +900,70 @@ function stopActiveResponse(showStatus = true) {
   updateSendButton();
   promptInput.focus();
   if (showStatus) setStatus('已停止', '已停止文字输出和语音播放。');
+}
+
+function createImageView() {
+  const bubble = createMessage('assistant');
+  const placeholder = document.createElement('div');
+  placeholder.className = 'image-generation-note waiting';
+  placeholder.textContent = '正在调用画图 API…';
+  bubble.append(placeholder);
+  return {bubble, placeholder};
+}
+
+async function askImage(prompt) {
+  if (isBusy || !prompt.trim()) return;
+  if (!conversationId) conversationId = createConversationId();
+  hideTtsProgress();
+  const controller = new AbortController();
+  const request = {controller, stopped: false, kind: 'image'};
+  activeRequest = request;
+  isBusy = true;
+  updateSendButton();
+  document.querySelector('.welcome')?.remove();
+  createMessage('user', prompt);
+  if (!history.length) setConversationTitle(prompt);
+  const view = createImageView();
+  request.placeholder = view.placeholder;
+  setStatus('正在画图', '图片生成可能需要几十秒，请稍候。', 'working');
+
+  try {
+    const response = await fetch('/api/images', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      signal: controller.signal,
+      body: JSON.stringify({prompt, web_chat: webChatSettings, web_image: webImageSettings}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok) throw new Error(readableError(data.detail || data));
+    if (!data.url) throw new Error('画图 API 未返回图片地址。');
+    const image = document.createElement('img');
+    image.className = 'generated-image';
+    image.src = data.url;
+    image.alt = prompt;
+    image.onload = () => scrollToBottom();
+    view.placeholder.replaceWith(image);
+    if (data.revised_prompt) {
+      const note = document.createElement('p');
+      note.className = 'image-generation-note';
+      note.textContent = `优化后的提示词：${data.revised_prompt}`;
+      image.after(note);
+    }
+    setStatus('图片已生成', '可关闭画图模式后继续正常聊天。');
+  } catch (error) {
+    if (error.name === 'AbortError' || request.stopped) return;
+    view.placeholder.replaceWith(Object.assign(document.createElement('div'), {
+      className: 'image-generation-note error-message', textContent: `画图失败：${readableError(error)}`,
+    }));
+    setStatus('画图失败', error, 'error');
+  } finally {
+    if (activeRequest !== request) return;
+    activeRequest = null;
+    isBusy = false;
+    promptInput.disabled = false;
+    updateSendButton();
+    promptInput.focus();
+  }
 }
 
 async function ask(message, attachments = []) {
@@ -726,10 +979,10 @@ async function ask(message, attachments = []) {
     narrationStarted = false;
   }
   updateSendButton();
-  promptInput.disabled = true;
   document.querySelector('.welcome')?.remove();
   const userBubble = createMessage('user', message);
   appendAttachmentSummary(userBubble, attachments);
+  if (attachments.length) userBubble.parentElement.dataset.hasAttachments = 'true';
   if (!history.length) setConversationTitle(message);
   activeAssistant = createAssistantView();
   setStatus('正在回答', '文字会直接显示，不等待语音生成。', 'working');
@@ -744,10 +997,13 @@ async function ask(message, attachments = []) {
         message,
         history,
         attachments: attachments.map((attachment) => ({id: attachment.id})),
-        web_search: webSearchEnabled,
+        web_search: false,
+        location: locationContext,
+        agent_enabled: true,
         voice: voiceSelect.value,
         speaking_speed: selectedSpeakingSpeed(),
         web_chat: webChatSettings,
+        web_image: webImageSettings,
       }),
     });
     if (!response.ok || !response.body) {
@@ -772,8 +1028,12 @@ async function ask(message, attachments = []) {
         const data = JSON.parse(dataText);
         if (event === 'status') {
           setStatus('正在处理', data.message, 'working');
+        } else if (event === 'agent_step') {
+          appendAgentStep(activeAssistant, data);
         } else if (event === 'search_results') {
           showSearchResults(activeAssistant, data);
+        } else if (event === 'image') {
+          showToolGeneratedImage(activeAssistant, data);
         } else if (event === 'thinking') {
           activeAssistant.thinking.hidden = false;
           activeAssistant.summary.textContent = '思考中（点击展开）';
@@ -838,7 +1098,7 @@ async function initialize() {
   try {
     const response = await fetch('/api/status');
     const data = await response.json();
-    applyConfigDefaults(data.chat_defaults);
+    applyConfigDefaults(data.chat_defaults, data.image_defaults);
     playbackPrebufferSegments = Math.max(1, Math.min(4, Number(data.playback_prebuffer_segments) || 2));
     voiceSelect.innerHTML = '';
     for (const voice of data.voices) voiceSelect.add(new Option(voice.replace(/\.[^.]+$/, ''), voice, false, voice === data.default_voice));
@@ -852,18 +1112,21 @@ async function initialize() {
   await loadConversationList();
 }
 
-composer.addEventListener('submit', (event) => {
+composer.addEventListener('submit', async (event) => {
   event.preventDefault();
   if (isBusy) {
     stopActiveResponse();
     return;
   }
   const message = promptInput.value.trim();
-  if (!message || !voiceSelect.value || attachmentUploadInProgress) return;
+  if (!message || attachmentUploadInProgress || !voiceSelect.value) return;
   const attachments = pendingAttachments.filter((attachment) => attachment.id);
-  unlockAudio();
+  if (!locationContext && needsCurrentLocation(message)) {
+    await requestCurrentLocation({silent: true});
+  }
   promptInput.value = '';
   promptInput.style.height = 'auto';
+  unlockAudio();
   pendingAttachments = [];
   renderAttachmentList();
   updateSendButton();
@@ -891,12 +1154,14 @@ settingsModal.addEventListener('click', (event) => {
 forceWebConfigButton.addEventListener('click', () => {
   if (webChatSettings.force_web_config) {
     webChatSettings.force_web_config = false;
+    webImageSettings.force_web_config = false;
     webChatSettings.thinking_override = false;
     if (typeof configDefaults.thinking === 'boolean') webChatSettings.thinking = configDefaults.thinking;
-    setStatus('已切换到 config.txt', '下一次对话将优先使用配置文件。');
+    setStatus('已切换到 config.txt', '下一次聊天和画图将优先使用配置文件。');
   } else {
     webChatSettings.force_web_config = true;
-    setStatus('已切换到网页配置', '下一次对话将使用本页填写的接口信息。');
+    webImageSettings.force_web_config = true;
+    setStatus('已切换到网页配置', '下一次聊天和画图将使用本页填写的接口信息。');
   }
   updateSettingsSource();
   updateThinkingButton();
@@ -914,11 +1179,6 @@ attachmentList.addEventListener('click', (event) => {
   pendingAttachments = pendingAttachments.filter((attachment) => attachment.id !== remove.dataset.attachmentId);
   renderAttachmentList();
   updateSendButton();
-});
-webSearchButton.addEventListener('click', () => {
-  webSearchEnabled = !webSearchEnabled;
-  updateWebSearchButton();
-  setStatus(webSearchEnabled ? '联网搜索已开启' : '联网搜索已关闭', webSearchEnabled ? '下一次提问会附带实时搜索参考。' : '下一次提问只使用模型和附件内容。');
 });
 conversationList.addEventListener('click', (event) => {
   const deleteButton = event.target.closest('button[data-delete-conversation-id]');
@@ -949,6 +1209,5 @@ document.addEventListener('click', () => {
 });
 initialize();
 updateSpeedLabel();
-updateWebSearchButton();
 renderAttachmentList();
 updateSendButton();

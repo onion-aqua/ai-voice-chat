@@ -8,6 +8,23 @@ model =
 # Optional: true or false. Leave empty to use the model default.
 thinking =
 
+[image]
+# Image generation always uses a dedicated image model, never the chat model.
+# Recommended: auto queries this endpoint's /models and selects the newest recognized image model.
+# If your proxy does not expose /models, set its exact model ID instead.
+# OpenAI: gpt-image-1.5; Gemini OpenAI compatibility: gemini-3.1-flash-image.
+api_key =
+base_url =
+model = auto
+size = 1024x1024
+# high gives the best final image quality; it can take longer and cost more.
+quality = high
+# auto: first try /images/generations, then use Responses on Sub2API gpt-image-2 502.
+# images: only /images/generations. responses: always use the streaming Responses image tool.
+api_mode = auto
+# Required by responses mode. Leave blank to reuse [chat] model; do not use gpt-image-2 here.
+responses_model =
+
 [index_tts]
 project_home = D:/yzylauncher-win-Indextts20-260616/win-unpacked/python
 playback_prebuffer_segments = 2

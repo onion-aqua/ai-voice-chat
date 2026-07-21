@@ -23,6 +23,8 @@ if (Get-NetTCPConnection -LocalPort $serverPort -State Listen -ErrorAction Silen
 }
 
 Set-Location -LiteralPath $appDir
+$env:PYTHONUNBUFFERED = '1'
+$env:AI_VOICE_CHAT_LOG_LEVEL = 'DEBUG'
 $url = "http://${serverHost}:$serverPort"
 Write-Host ''
 Write-Host '============================================================'
@@ -58,7 +60,7 @@ $browserJob = Start-Job -ScriptBlock {
 } -ArgumentList $url
 
 try {
-    & $pythonExe -m uvicorn app:app --app-dir $appDir --host $serverHost --port $serverPort
+    & $pythonExe -u -m uvicorn app:app --app-dir $appDir --host $serverHost --port $serverPort --log-level debug --access-log
 } finally {
     Remove-Job -Job $browserJob -Force -ErrorAction SilentlyContinue
 }

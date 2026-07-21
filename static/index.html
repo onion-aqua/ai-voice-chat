@@ -68,7 +68,6 @@
           <textarea id="prompt" rows="1" maxlength="4000" placeholder="输入你想问的问题…" aria-label="输入问题"></textarea>
           <input id="file-input" type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.json,.log,.ini,.yaml,.yml,.xml,.py,.js,.ts,.html,.css,.sql,.java,.c,.cpp,.h,.hpp,.sh,.ps1,.bat,.cmd,.pdf,.docx">
           <button id="attach-button" class="composer-tool" type="button" title="上传图片或文件">附件</button>
-          <button id="web-search-button" class="composer-tool web-search-button" type="button" aria-pressed="false" title="开启或关闭联网搜索">联网</button>
           <button id="thinking-button" class="thinking-button" type="button" aria-pressed="false" title="开启或关闭思考模式">思考</button>
           <button id="send" class="send-button" type="submit" disabled><span>发送</span><kbd>↵</kbd></button>
         </div>
@@ -92,12 +91,20 @@
         <label>模型名称<input id="web-model" type="text" autocomplete="off" placeholder="例如 qwen3.5"></label>
         <label class="settings-wide">Base URL<input id="web-base-url" type="url" autocomplete="url" placeholder="http://127.0.0.1:1234/v1"></label>
         <label class="settings-wide">API Key<input id="web-api-key" type="password" autocomplete="off" placeholder="配置文件已设置时可留空"></label>
+        <p class="settings-subheading settings-wide">图片生成（可与聊天接口不同）</p>
+        <label>图片模型<input id="web-image-model" type="text" autocomplete="off" value="auto" placeholder="auto 或 gpt-image-1.5"></label>
+        <label>图片接口模式
+          <select id="web-image-api-mode"><option value="auto">自动兼容</option><option value="images">Images API</option><option value="responses">Responses 工具</option></select>
+        </label>
+        <label class="settings-wide">Responses 模型<input id="web-image-responses-model" type="text" autocomplete="off" placeholder="留空则复用聊天模型；不要填 gpt-image-2"></label>
+        <label class="settings-wide">图片 Base URL<input id="web-image-base-url" type="url" autocomplete="url" placeholder="留空则复用聊天 Base URL"></label>
+        <label class="settings-wide">图片 API Key<input id="web-image-api-key" type="password" autocomplete="off" placeholder="留空则复用聊天 API Key"></label>
       </div>
       <div class="settings-options"><button id="force-web-config" class="force-web-config" type="button" aria-pressed="false">强制使用网页配置</button></div>
-      <p class="settings-help">默认优先读取 config.txt；点击右侧按钮后，本次页面填写的接口设置将强制生效。API Key 不会回显或写入配置文件。</p>
+      <p class="settings-help">默认优先读取 config.txt；点击右侧按钮后，本次页面填写的聊天和画图设置将强制生效。图片模型设为 auto 时会从当前图片接口的模型列表中选择。Sub2API 的 gpt-image-2 出现 502 时，可选 Responses 工具，并填入可用的聊天模型。API Key 不会回显或写入配置文件。</p>
       <footer class="settings-footer"><button id="save-settings" class="save-settings" type="button">保存本页设置</button></footer>
     </section>
   </div>
-  <script src="/static/app.js"></script>
+  <script src="/static/app.js?v=20260719-agent-default-tools"></script>
 </body>
 </html>
