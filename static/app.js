@@ -60,6 +60,8 @@ let audioWasUnlocked = false;
 let playbackPrebufferSegments = 2;
 let waitingForInitialNarration = false;
 let narrationStarted = false;
+let narrationPauseTimer = null;
+let lastNarrationEndedAt = 0;
 let pendingAttachments = [];
 let attachmentUploadInProgress = false;
 let locationContext = null;
@@ -78,6 +80,7 @@ let live2dDrag = null;
 
 const LIVE2D_ZOOM_MIN = 0.55;
 const LIVE2D_ZOOM_MAX = 2.8;
+const NARRATION_LINE_PAUSE_MS = 260;
 
 const LIVE2D_EMOTIONS = {
   calm: {label: '平静待机', icon: '◌', keywords: ['托脸', '喝饮料', '猫猫嘴']},
@@ -617,6 +620,11 @@ function queueConversationSave() {
 }
 
 function stopNarrationPlayback() {
+  if (narrationPauseTimer) {
+    window.clearTimeout(narrationPauseTimer);
+    narrationPauseTimer = null;
+  }
+  lastNarrationEndedAt = 0;
   currentAudio?.pause();
   removeHighlights(currentNarration);
   audioQueue.forEach((narration) => {
@@ -1039,9 +1047,18 @@ async function initializeLive2D() {
 }
 
 function playNextNarration() {
-  if (isMuted || currentAudio || audioQueue.length === 0) return;
+  if (isMuted || currentAudio || narrationPauseTimer || audioQueue.length === 0) return;
   if (!narrationStarted && waitingForInitialNarration && audioQueue.length < playbackPrebufferSegments) {
     setStatus('正在缓冲语音', `已准备 ${audioQueue.length}/${playbackPrebufferSegments} 段，随后连续朗读。`, 'working');
+    return;
+  }
+  const elapsedSincePreviousLine = lastNarrationEndedAt ? performance.now() - lastNarrationEndedAt : NARRATION_LINE_PAUSE_MS;
+  const remainingPause = Math.max(0, NARRATION_LINE_PAUSE_MS - elapsedSincePreviousLine);
+  if (remainingPause > 0) {
+    narrationPauseTimer = window.setTimeout(() => {
+      narrationPauseTimer = null;
+      playNextNarration();
+    }, remainingPause);
     return;
   }
   const narration = audioQueue.shift();
@@ -1065,9 +1082,13 @@ function playNextNarration() {
     removeHighlights(narration);
     currentAudio = null;
     currentNarration = null;
-    playNextNarration();
+    lastNarrationEndedAt = performance.now();
+    setLive2DPlaybackState(false);
+    if (audioQueue.length) {
+      setStatus('句间停顿', '即将朗读下一句。', 'working');
+      playNextNarration();
+    }
     if (!audioQueue.length) {
-      setLive2DPlaybackState(false);
       if (!isBusy) setStatus('准备就绪', '本轮语音已播放完毕。');
     }
   });
@@ -1075,6 +1096,7 @@ function playNextNarration() {
     removeHighlights(narration);
     currentAudio = null;
     currentNarration = null;
+    lastNarrationEndedAt = 0;
     if (!audioQueue.length) setLive2DPlaybackState(false);
     setStatus('播放失败', '音频文件无法播放，请重试。', 'error');
     playNextNarration();
