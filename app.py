@@ -814,11 +814,24 @@ def completed_live2d_model_definition(model_path: Path) -> dict:
 
     motions_dir = model_dir / "motions"
     if motions_dir.is_dir() and not references.get("Motions"):
-        motions = []
+        idle_motions = []
+        manual_motions = []
         for motion_path in sorted(motions_dir.rglob("*.motion3.json")):
-            motions.append({"File": motion_path.relative_to(model_dir).as_posix()})
-        if motions:
-            references["Motions"] = {"Idle": motions}
+            motion = {"File": motion_path.relative_to(model_dir).as_posix()}
+            # Only the intentionally named idle animation may loop by itself.
+            # VTube exports often include pose-switch motions such as 变芒/变荒;
+            # registering them as Idle makes the renderer trigger them randomly.
+            if "待机" in motion_path.stem:
+                idle_motions.append(motion)
+            else:
+                manual_motions.append(motion)
+        motion_groups = {}
+        if idle_motions:
+            motion_groups["Idle"] = idle_motions
+        if manual_motions:
+            motion_groups["Manual"] = manual_motions
+        if motion_groups:
+            references["Motions"] = motion_groups
     return definition
 
 
