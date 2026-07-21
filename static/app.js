@@ -70,6 +70,7 @@ let live2dSpeaking = false;
 let live2dExpression = 'calm';
 let live2dNaturalSize = null;
 let live2dExpressionNames = [];
+let live2dPluginRegistered = false;
 
 const LIVE2D_EMOTIONS = {
   calm: {label: '平静待机', icon: '◌', keywords: ['托脸', '喝饮料', '猫猫嘴']},
@@ -897,7 +898,8 @@ function updateLive2DMouthFromAudio() {
 async function initializeLive2D() {
   if (!live2dCanvas || !live2dStage) return;
   const Live2DModel = window.PIXI?.live2d?.Live2DModel;
-  if (!window.PIXI || !Live2DModel || !window.Live2DCubismCore) {
+  const Live2DPlugin = window.PIXI?.live2d?.Live2DPlugin;
+  if (!window.PIXI || !Live2DModel || !Live2DPlugin || !window.PIXI.extensions || !window.Live2DCubismCore) {
     setLive2DStatus('不可用', 'error');
     if (live2dFallback) {
       live2dFallback.querySelector('strong').textContent = 'Live2D 渲染器未加载';
@@ -906,21 +908,33 @@ async function initializeLive2D() {
     return;
   }
   try {
+    // This local VTube-exported model has 226 independent masks. The legacy
+    // renderer supports at most 64, while this engine selects high-precision
+    // masks automatically. Register its render pipe before Pixi is initialized.
+    if (!live2dPluginRegistered) {
+      window.PIXI.extensions.add(Live2DPlugin);
+      live2dPluginRegistered = true;
+    }
+    window.PIXI.live2d.configureCubismSDK?.({memorySizeMB: 32});
     const modelResponse = await fetch('/api/live2d/models', {cache: 'no-store'});
     const modelCatalog = await modelResponse.json().catch(() => ({}));
     const localModel = modelCatalog.default_model;
     if (!modelResponse.ok || !localModel?.url) {
       throw new Error('未在 live2dmodels 文件夹中找到 .model3.json 模型文件。');
     }
-    const app = new window.PIXI.Application({
-      view: live2dCanvas,
+    const app = new window.PIXI.Application();
+    await app.init({
+      canvas: live2dCanvas,
       autoStart: true,
       antialias: true,
       backgroundAlpha: 0,
       autoDensity: true,
       resolution: Math.min(window.devicePixelRatio || 1, 2),
+      width: Math.max(1, Math.floor(live2dStage.clientWidth)),
+      height: Math.max(1, Math.floor(live2dStage.clientHeight)),
+      preference: 'webgl',
     });
-    const model = await Live2DModel.from(localModel.url, {autoInteract: false});
+    const model = await Live2DModel.from(localModel.url, {autoHitTest: false, autoFocus: false});
     model.anchor.set(0.5, 1);
     app.stage.addChild(model);
     live2dApp = app;
