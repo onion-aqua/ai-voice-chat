@@ -19,7 +19,7 @@ import uuid
 from html import unescape
 from pathlib import Path
 from typing import Iterator
-from urllib.parse import parse_qs, quote_plus, unquote, urlencode, urljoin, urlparse
+from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urljoin, urlparse
 
 import httpx
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -36,6 +36,7 @@ MEDIA_DIR = APP_DIR / "runtime" / "audio"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 GENERATED_IMAGE_DIR = MEDIA_DIR.parent / "images"
 GENERATED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+LIVE2D_MODELS_DIR = APP_DIR / "live2dmodels"
 CONVERSATIONS_PATH = MEDIA_DIR.parent / "conversations.json"
 CONVERSATIONS_LOCK = threading.Lock()
 DEFAULT_INDEXTTS_HOME = Path(r"D:\yzylauncher-win-Indextts20-260616\win-unpacked\python")
@@ -783,6 +784,86 @@ class IndexTTSService:
 
 TTS = IndexTTSService(Path(SETTINGS["index_tts_home"]))
 app = FastAPI(title="AI Voice Chat")
+
+
+def is_within_live2d_models(path: Path) -> bool:
+    """Keep the local model endpoint limited to the configured model folder."""
+    try:
+        path.relative_to(LIVE2D_MODELS_DIR.resolve())
+        return True
+    except ValueError:
+        return False
+
+
+def completed_live2d_model_definition(model_path: Path) -> dict:
+    """Register side-car expressions and motions omitted by some VTube exports."""
+    definition = json.loads(model_path.read_text(encoding="utf-8"))
+    references = definition.setdefault("FileReferences", {})
+    model_dir = model_path.parent
+
+    expressions_dir = model_dir / "expressions"
+    if expressions_dir.is_dir() and not references.get("Expressions"):
+        expressions = []
+        for expression_path in sorted(expressions_dir.rglob("*.exp3.json")):
+            expressions.append({
+                "Name": expression_path.name.removesuffix(".exp3.json"),
+                "File": expression_path.relative_to(model_dir).as_posix(),
+            })
+        if expressions:
+            references["Expressions"] = expressions
+
+    motions_dir = model_dir / "motions"
+    if motions_dir.is_dir() and not references.get("Motions"):
+        motions = []
+        for motion_path in sorted(motions_dir.rglob("*.motion3.json")):
+            motions.append({"File": motion_path.relative_to(model_dir).as_posix()})
+        if motions:
+            references["Motions"] = {"Idle": motions}
+    return definition
+
+
+def local_live2d_models() -> list[dict[str, object]]:
+    if not LIVE2D_MODELS_DIR.is_dir():
+        return []
+    models = []
+    for model_path in sorted(LIVE2D_MODELS_DIR.rglob("*.model3.json")):
+        relative_path = model_path.relative_to(LIVE2D_MODELS_DIR)
+        try:
+            definition = completed_live2d_model_definition(model_path)
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            LOGGER.warning("[Live2D] skipped invalid model %s: %s", relative_path, exc)
+            continue
+        expressions = [item.get("Name") for item in definition.get("FileReferences", {}).get("Expressions", [])]
+        models.append({
+            "id": relative_path.as_posix(),
+            "name": model_path.parent.name,
+            "url": "/live2dmodels/" + quote(relative_path.as_posix()),
+            "expressions": [name for name in expressions if isinstance(name, str)],
+        })
+    return models
+
+
+@app.get("/live2dmodels/{asset_path:path}", include_in_schema=False)
+def serve_local_live2d_asset(asset_path: str):
+    """Serve local Cubism resources, augmenting the model descriptor when needed."""
+    if not LIVE2D_MODELS_DIR.is_dir():
+        raise HTTPException(status_code=404, detail="live2dmodels folder was not found.")
+    requested_path = (LIVE2D_MODELS_DIR / asset_path).resolve()
+    if not is_within_live2d_models(requested_path) or not requested_path.is_file():
+        raise HTTPException(status_code=404, detail="Live2D asset was not found.")
+    if requested_path.name.endswith(".model3.json"):
+        try:
+            return Response(
+                content=json.dumps(completed_live2d_model_definition(requested_path), ensure_ascii=False),
+                media_type="application/json",
+                headers={"Cache-Control": "no-store, max-age=0"},
+            )
+        except (OSError, UnicodeDecodeError, json.JSONDecodeError) as exc:
+            LOGGER.warning("[Live2D] failed to read %s: %s", requested_path.name, exc)
+            raise HTTPException(status_code=500, detail="Live2D model descriptor could not be read.") from exc
+    return FileResponse(requested_path, headers={"Cache-Control": "no-store, max-age=0"})
+
+
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
 app.mount("/generated-images", StaticFiles(directory=GENERATED_IMAGE_DIR), name="generated-images")
@@ -797,7 +878,7 @@ async def log_http_request(request, call_next):
     except Exception:
         LOGGER.exception("[HTTP] %s %s failed", request.method, request.url.path)
         raise
-    if request.url.path == "/" or request.url.path.startswith("/static/"):
+    if request.url.path == "/" or request.url.path.startswith("/static/") or request.url.path.startswith("/live2dmodels/"):
         # The app is launched locally and updated in place.  Do not let an old
         # cached index.html or app.js hide a newly added front-end feature.
         response.headers["Cache-Control"] = "no-store, max-age=0"
@@ -1713,6 +1794,12 @@ def status():
         "playback_prebuffer_segments": SETTINGS["playback_prebuffer_segments"],
         "tts_model_state": TTS.model_status(),
     }
+
+
+@app.get("/api/live2d/models")
+def list_live2d_models():
+    models = local_live2d_models()
+    return {"models": models, "default_model": models[0] if models else None}
 
 
 @app.get("/api/conversations")

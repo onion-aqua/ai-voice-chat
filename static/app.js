@@ -69,17 +69,17 @@ let live2dModel = null;
 let live2dSpeaking = false;
 let live2dExpression = 'calm';
 let live2dNaturalSize = null;
+let live2dExpressionNames = [];
 
-const LIVE2D_MODEL_URL = 'https://cdn.jsdelivr.net/gh/guansss/pixi-live2d-display@master/test/assets/haru/haru_greeter_t03.model3.json';
 const LIVE2D_EMOTIONS = {
-  calm: {label: '平静待机', icon: '◌', expression: 'f00'},
-  joy: {label: '开心朗读', icon: '✦', expression: 'f03'},
-  anger: {label: '坚定朗读', icon: '◆', expression: 'f04'},
-  sadness: {label: '低落朗读', icon: '◔', expression: 'f06'},
-  fear: {label: '紧张朗读', icon: '△', expression: 'f02'},
-  disgust: {label: '克制朗读', icon: '◇', expression: 'f05'},
-  depression: {label: '忧郁朗读', icon: '◒', expression: 'f06'},
-  surprise: {label: '惊喜朗读', icon: '✧', expression: 'f07'},
+  calm: {label: '平静待机', icon: '◌', keywords: ['托脸', '喝饮料', '猫猫嘴']},
+  joy: {label: '开心朗读', icon: '✦', keywords: ['星星', '大聪明', '拿蛋糕']},
+  anger: {label: '坚定朗读', icon: '◆', keywords: ['生气']},
+  sadness: {label: '低落朗读', icon: '◔', keywords: ['哭']},
+  fear: {label: '紧张朗读', icon: '△', keywords: ['汗']},
+  disgust: {label: '克制朗读', icon: '◇', keywords: ['撅嘴']},
+  depression: {label: '忧郁朗读', icon: '◒', keywords: ['托脸', '哭']},
+  surprise: {label: '惊喜朗读', icon: '✧', keywords: ['星星', '帽子']},
 };
 
 function unlockAudio() {
@@ -846,10 +846,15 @@ function applyLive2DExpression(vector, force = false) {
   if (live2dEmotionLabel) live2dEmotionLabel.textContent = emotion.label;
   if (!live2dModel || (!force && emotionKey === live2dExpression)) return;
   live2dExpression = emotionKey;
+  const expressionName = emotion.keywords
+    .map((keyword) => live2dExpressionNames.find((name) => name.includes(keyword)))
+    .find(Boolean)
+    || live2dExpressionNames[Object.keys(LIVE2D_EMOTIONS).indexOf(emotionKey) % Math.max(1, live2dExpressionNames.length)];
+  if (!expressionName) return;
   try {
-    Promise.resolve(live2dModel.expression(emotion.expression)).catch(() => {});
+    Promise.resolve(live2dModel.expression(expressionName)).catch(() => {});
   } catch (_) {
-    // Keep the demo usable with models that do not define the sample expressions.
+    // Keep the demo usable with a model whose expression was rejected.
   }
 }
 
@@ -895,12 +900,18 @@ async function initializeLive2D() {
   if (!window.PIXI || !Live2DModel || !window.Live2DCubismCore) {
     setLive2DStatus('不可用', 'error');
     if (live2dFallback) {
-      live2dFallback.querySelector('strong').textContent = 'Live2D 演示资源未加载';
-      live2dFallback.querySelector('p').textContent = '请检查网络是否可访问 jsDelivr 与 Live2D CDN。';
+      live2dFallback.querySelector('strong').textContent = 'Live2D 渲染器未加载';
+      live2dFallback.querySelector('p').textContent = '请检查网络是否可访问 Live2D 运行库。';
     }
     return;
   }
   try {
+    const modelResponse = await fetch('/api/live2d/models', {cache: 'no-store'});
+    const modelCatalog = await modelResponse.json().catch(() => ({}));
+    const localModel = modelCatalog.default_model;
+    if (!modelResponse.ok || !localModel?.url) {
+      throw new Error('未在 live2dmodels 文件夹中找到 .model3.json 模型文件。');
+    }
     const app = new window.PIXI.Application({
       view: live2dCanvas,
       autoStart: true,
@@ -909,11 +920,12 @@ async function initializeLive2D() {
       autoDensity: true,
       resolution: Math.min(window.devicePixelRatio || 1, 2),
     });
-    const model = await Live2DModel.from(LIVE2D_MODEL_URL, {autoInteract: false});
+    const model = await Live2DModel.from(localModel.url, {autoInteract: false});
     model.anchor.set(0.5, 1);
     app.stage.addChild(model);
     live2dApp = app;
     live2dModel = model;
+    live2dExpressionNames = Array.isArray(localModel.expressions) ? localModel.expressions : [];
     live2dNaturalSize = {width: Math.max(1, model.width), height: Math.max(1, model.height)};
     const observer = new ResizeObserver(resizeLive2D);
     observer.observe(live2dStage);
@@ -923,11 +935,11 @@ async function initializeLive2D() {
     live2dFallback.hidden = true;
     setLive2DStatus('待机', 'ready');
   } catch (error) {
-    console.warn('Live2D demo failed to load.', error);
+    console.warn('Live2D local model failed to load.', error);
     setLive2DStatus('加载失败', 'error');
     if (live2dFallback) {
-      live2dFallback.querySelector('strong').textContent = 'Live2D 演示模型加载失败';
-      live2dFallback.querySelector('p').textContent = '不影响聊天和朗读；请检查网络或稍后刷新页面。';
+      live2dFallback.querySelector('strong').textContent = '本地 Live2D 模型加载失败';
+      live2dFallback.querySelector('p').textContent = '不影响聊天和朗读；请检查 live2dmodels 中的模型资源是否完整。';
     }
   }
 }

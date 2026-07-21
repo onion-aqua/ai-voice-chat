@@ -1,6 +1,7 @@
 # Local configuration and runtime data
 config.txt
 runtime/
+live2dmodels/
 
 # Python cache and editor files
 __pycache__/

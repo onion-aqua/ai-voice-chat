@@ -87,7 +87,7 @@
         <canvas id="live2d-canvas" aria-label="Live2D 朗读助手"></canvas>
         <div id="live2d-fallback" class="live2d-fallback">
           <span class="live2d-fallback-mark">✦</span>
-          <strong>正在加载演示模型</strong>
+          <strong>正在加载本地模型</strong>
           <p>模型会随 IndexTTS2 朗读同步切换状态和表情。</p>
         </div>
       </div>
@@ -95,7 +95,7 @@
         <span class="live2d-emotion-icon" id="live2d-emotion-icon">◌</span>
         <div><small>当前朗读情绪</small><strong id="live2d-emotion-label">平静待机</strong></div>
       </section>
-      <p class="live2d-note">演示使用公开的 Live2D 示例模型；后续可替换为你自己的授权模型文件。</p>
+      <p class="live2d-note">当前使用 live2dmodels 文件夹中的本地模型。</p>
     </aside>
 
   </main>
@@ -131,6 +131,6 @@
   <script defer src="https://cdn.jsdelivr.net/npm/pixi.js@6.5.10/dist/browser/pixi.min.js" crossorigin="anonymous"></script>
   <script defer src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js" crossorigin="anonymous"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/pixi-live2d-display@0.4.0/dist/cubism4.min.js" crossorigin="anonymous"></script>
-  <script defer src="/static/app.js?v=20260721-live2d-demo"></script>
+  <script defer src="/static/app.js?v=20260721-local-live2d"></script>
 </body>
 </html>
