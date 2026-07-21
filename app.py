@@ -43,6 +43,12 @@ DEFAULT_INDEXTTS_HOME = Path(r"D:\yzylauncher-win-Indextts20-260616\win-unpacked
 EMOTION_PROMPT_PATH = APP_DIR / "emotion_output_prompt.txt"
 EMOTION_DELIMITER = "&&"
 DEFAULT_EMOTION_VECTOR = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6]
+# Merge consecutive very short streaming rows into a reasonably sized TTS job.
+# Values count visible non-whitespace characters.
+TTS_BATCH_TARGET_CHARS = 48
+TTS_BATCH_MAX_CHARS = 64
+TTS_SHORT_LINE_CHARS = 20
+TTS_BATCH_MAX_WAIT_SECONDS = 0.55
 ATTACHMENTS_LOCK = threading.Lock()
 ATTACHMENTS: dict[str, dict] = {}
 MAX_ATTACHMENT_BYTES = 10 * 1024 * 1024
@@ -1712,8 +1718,26 @@ def stream_model(
         http_client.close()
 
 
-def split_display_lines(text: str) -> list[str]:
-    return [text.strip()] if text.strip() else []
+def tts_text_char_count(text: str) -> int:
+    """Count speech content without line-break formatting."""
+    return len(re.sub(r"\s+", "", text))
+
+
+def average_tts_emotion_vector(segments: list[tuple[int, str, list[float]]]) -> list[float]:
+    """Average merged-line emotions using each line's spoken-character weight."""
+    if not segments:
+        return DEFAULT_EMOTION_VECTOR.copy()
+
+    totals = [0.0] * len(DEFAULT_EMOTION_VECTOR)
+    total_weight = 0
+    for _, text, vector in segments:
+        weight = max(1, tts_text_char_count(text))
+        safe_vector = vector if len(vector) == len(DEFAULT_EMOTION_VECTOR) else DEFAULT_EMOTION_VECTOR
+        for index, value in enumerate(safe_vector):
+            totals[index] += float(value) * weight
+        total_weight += weight
+
+    return [max(0.0, min(1.0, value / total_weight)) for value in totals]
 
 
 @app.get("/")
@@ -1894,10 +1918,12 @@ def chat(request: ChatRequest):
         cancel_event = threading.Event()
         completed = False
         model_events: queue.Queue[tuple[str, str, list[float] | None]] = queue.Queue()
-        tts_jobs: queue.Queue[tuple[str, list[float], int, float] | None] = queue.Queue()
+        tts_jobs: queue.Queue[tuple[str, list[float], list[tuple[int, str]], float] | None] = queue.Queue()
         tts_events: queue.Queue[tuple[str, dict]] = queue.Queue()
         attachments: list[dict] = []
         search_results: list[dict[str, str]] = []
+        pending_tts_segments: list[tuple[int, str, list[float]]] = []
+        pending_tts_started_at: float | None = None
 
         try:
             if request.attachments:
@@ -1947,33 +1973,42 @@ def chat(request: ChatRequest):
                 try:
                     if job is None:
                         return
-                    segment, emotion_vector, line_id, speaking_speed = job
+                    segment, emotion_vector, line_segments, speaking_speed = job
                     if cancel_event.is_set():
                         continue
+                    line_ids = [line_id for line_id, _ in line_segments]
+                    current_line_id = line_ids[-1] if line_ids else 1
+                    batch_number = completed_segments + 1
                     model_state = TTS.model_status()
                     tts_events.put(("tts_progress", {
                         "stage": "loading" if model_state in {"not_loaded", "loading"} else "generating",
-                        "line_id": line_id,
+                        "line_id": current_line_id,
+                        "line_ids": line_ids,
+                        "batch_number": batch_number,
                         "completed": completed_segments,
                     }))
                     started_at = time.perf_counter()
-                    print(f"[TTS] start chars={len(segment)} text={segment[:36]!r}", flush=True)
+                    print(f"[TTS] start lines={line_ids} chars={tts_text_char_count(segment)} text={segment[:72]!r}", flush=True)
                     audio_name = TTS.synthesize(segment, request.voice, emotion_vector, speaking_speed)
                     if cancel_event.is_set():
                         continue
                     elapsed = time.perf_counter() - started_at
-                    print(f"[TTS] ready chars={len(segment)} seconds={elapsed:.2f}", flush=True)
+                    print(f"[TTS] ready lines={line_ids} chars={tts_text_char_count(segment)} seconds={elapsed:.2f}", flush=True)
                     completed_segments += 1
                     tts_events.put(("audio", {
                         "audio": f"/media/{audio_name}",
                         "text": segment,
-                        "line_id": line_id,
+                        "line_id": current_line_id,
+                        "line_ids": line_ids,
+                        "segments": [{"line_id": line_id, "text": text} for line_id, text in line_segments],
+                        "emotion_vector": emotion_vector,
                         "speaking_speed": speaking_speed,
-                        "lines": split_display_lines(segment),
                     }))
                     tts_events.put(("tts_progress", {
                         "stage": "ready",
-                        "line_id": line_id,
+                        "line_id": current_line_id,
+                        "line_ids": line_ids,
+                        "batch_number": batch_number,
                         "completed": completed_segments,
                     }))
                 except Exception as error:
@@ -1994,13 +2029,55 @@ def chat(request: ChatRequest):
                     return
                 yield sse(event, data)
 
-        def enqueue_line(text: str, emotion_vector: list[float], line_id: int) -> Iterator[bytes]:
+        def enqueue_tts_batch(segments: list[tuple[int, str, list[float]]]) -> Iterator[bytes]:
+            if not segments or cancel_event.is_set():
+                return
+            text = "\n".join(segment_text for _, segment_text, _ in segments)
+            line_segments = [(line_id, segment_text) for line_id, segment_text, _ in segments]
+            emotion_vector = average_tts_emotion_vector(segments)
+            tts_jobs.put((text, emotion_vector, line_segments, request.speaking_speed))
+            print(
+                f"[TTS] queued lines={[line_id for line_id, _ in line_segments]} "
+                f"chars={tts_text_char_count(text)} text={text[:72]!r}",
+                flush=True,
+            )
+            yield sse("status", {"message": "正在预生成下一段语音…"})
+
+        def flush_pending_tts() -> Iterator[bytes]:
+            nonlocal pending_tts_segments, pending_tts_started_at
+            if not pending_tts_segments:
+                return
+            segments = pending_tts_segments
+            pending_tts_segments = []
+            pending_tts_started_at = None
+            yield from enqueue_tts_batch(segments)
+
+        def accept_tts_line(text: str, emotion_vector: list[float], line_id: int) -> Iterator[bytes]:
+            """Merge only consecutive short visible lines; display rows stay intact."""
+            nonlocal pending_tts_started_at
             segment = text.strip()
             if not segment or cancel_event.is_set():
                 return
-            tts_jobs.put((segment, emotion_vector, line_id, request.speaking_speed))
-            print(f"[TTS] queued chars={len(segment)} text={segment[:36]!r}", flush=True)
-            yield sse("status", {"message": "正在预生成下一段语音…"})
+
+            candidate = (line_id, segment, emotion_vector)
+            candidate_chars = tts_text_char_count(segment)
+            if candidate_chars > TTS_SHORT_LINE_CHARS:
+                # A normal-length row is suitable alone. Flush earlier short
+                # rows first so both audio and highlights remain in order.
+                yield from flush_pending_tts()
+                yield from enqueue_tts_batch([candidate])
+                return
+
+            pending_chars = sum(tts_text_char_count(item[1]) for item in pending_tts_segments)
+            if pending_tts_segments and pending_chars + candidate_chars > TTS_BATCH_MAX_CHARS:
+                yield from flush_pending_tts()
+                pending_chars = 0
+
+            pending_tts_segments.append(candidate)
+            if pending_tts_started_at is None:
+                pending_tts_started_at = time.monotonic()
+            if pending_chars + candidate_chars >= TTS_BATCH_TARGET_CHARS:
+                yield from flush_pending_tts()
 
         try:
             yield sse("status", {"message": "正在获取回答…"})
@@ -2010,8 +2087,16 @@ def chat(request: ChatRequest):
                 # Audio events are checked continuously, even while the language
                 # model is paused between two stream chunks.
                 yield from ready_tts_events()
+                if (
+                    pending_tts_segments
+                    and pending_tts_started_at is not None
+                    and time.monotonic() - pending_tts_started_at >= TTS_BATCH_MAX_WAIT_SECONDS
+                ):
+                    # Keep streaming responsive if the next newline arrives late.
+                    yield from flush_pending_tts()
                 if model_finished and not tts_closed:
                     answer = answer.strip()
+                    yield from flush_pending_tts()
                     tts_jobs.put(None)
                     tts_closed = True
 
@@ -2054,7 +2139,7 @@ def chat(request: ChatRequest):
                 history_line = f"{delta}{EMOTION_DELIMITER}{json.dumps(vector, ensure_ascii=False, separators=(',', ':'))}"
                 model_history = f"{model_history}\n{history_line}" if model_history else history_line
                 yield sse("delta", {"text": delta, "line_id": line_number, "emotion_vector": vector})
-                yield from enqueue_line(delta, vector, line_number)
+                yield from accept_tts_line(delta, vector, line_number)
             completed = True
             yield sse("done", {"answer": answer, "model_history": model_history})
         except Exception as error:

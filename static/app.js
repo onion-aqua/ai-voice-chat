@@ -475,7 +475,7 @@ function appendAgentStep(view, data) {
 
 function showTtsProgress(data) {
   const stage = data.stage || 'generating';
-  const lineNumber = Number(data.line_id) || 1;
+  const lineNumber = Number(data.batch_number) || Number(data.line_id) || 1;
   const completed = Number(data.completed) || 0;
   ttsProgress.hidden = false;
   ttsProgress.className = `tts-progress ${stage}`;
@@ -1180,19 +1180,27 @@ function appendAnswerDelta(view, text, lineId) {
   lineView.tail.data += text;
 }
 
-function appendSpeechLines(view, lines, text, lineId) {
-  const lineView = view.lines.get(lineId);
-  if (!lineView) return [];
-  const {line, tail} = lineView;
-  const leadingWhitespace = tail.data.match(/^\s*/)?.[0] || '';
-  if (!tail.data.slice(leadingWhitespace.length).startsWith(text)) return [];
-  tail.data = tail.data.slice(leadingWhitespace.length + text.length);
+function appendSpeechSegments(view, segments, fallbackText, fallbackLineId) {
+  const normalizedSegments = Array.isArray(segments) && segments.length
+    ? segments : [{line_id: fallbackLineId, text: fallbackText}];
+  const operations = [];
+  for (const segment of normalizedSegments) {
+    const text = String(segment?.text || '');
+    const lineId = Number(segment?.line_id);
+    const lineView = view.lines.get(lineId);
+    if (!text || !lineView) return [];
+    const leadingWhitespace = lineView.tail.data.match(/^\s*/)?.[0] || '';
+    if (!lineView.tail.data.slice(leadingWhitespace.length).startsWith(text)) return [];
+    operations.push({lineView, text, leadingWhitespace});
+  }
+
   const elements = [];
-  for (const line of lines) {
+  for (const {lineView, text, leadingWhitespace} of operations) {
     const element = document.createElement('span');
     element.className = 'speech-line';
-    element.textContent = line;
-    lineView.line.insertBefore(element, tail);
+    element.textContent = text;
+    lineView.tail.data = lineView.tail.data.slice(leadingWhitespace.length + text.length);
+    lineView.line.insertBefore(element, lineView.tail);
     elements.push(element);
   }
   return elements;
@@ -1384,8 +1392,9 @@ async function ask(message, attachments = []) {
           answerForModel = answerForModel ? `${answerForModel}\n${historyLine}` : historyLine;
           if (!activeAssistant.thinking.hidden) activeAssistant.summary.textContent = '思考过程（点击展开）';
         } else if (event === 'audio') {
-          const lines = appendSpeechLines(activeAssistant, data.lines, data.text, data.line_id);
-          const emotionVector = activeAssistant.emotionVectors.get(String(data.line_id));
+          const lines = appendSpeechSegments(activeAssistant, data.segments, data.text, data.line_id);
+          const emotionVector = Array.isArray(data.emotion_vector)
+            ? data.emotion_vector : activeAssistant.emotionVectors.get(String(data.line_id));
           if (lines.length) queueNarration(data.audio, lines, data.speaking_speed || 1, emotionVector);
         } else if (event === 'tts_progress') {
           showTtsProgress(data);
