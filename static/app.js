@@ -58,6 +58,7 @@ let webChatSettings = {
   force_web_config: false,
 };
 let webImageSettings = {api_key: '', base_url: '', model: 'auto', api_mode: 'auto', responses_model: '', force_web_config: false};
+let reasoningEffortMenuOpen = false;
 let isBusy = false;
 let activeRequest = null;
 let isMuted = false;
@@ -243,6 +244,7 @@ function saveWebSettings() {
 
 function applyConfigDefaults(defaults = {}, imageDefaults = {}) {
   configDefaults = {...defaults};
+  reasoningEffortMenuOpen = false;
   webChatSettings.provider = defaults.provider || webChatSettings.provider;
   webChatSettings.base_url = defaults.base_url || webChatSettings.base_url;
   webChatSettings.model = defaults.model || webChatSettings.model;
@@ -284,7 +286,8 @@ function activeConfiguredModel() {
 
 function updateReasoningEffortMenu() {
   const supportsEffort = isGpt56Model(activeConfiguredModel());
-  reasoningEffortMenu.hidden = !webChatSettings.thinking || !supportsEffort;
+  if (!supportsEffort) reasoningEffortMenuOpen = false;
+  reasoningEffortMenu.hidden = !reasoningEffortMenuOpen || !webChatSettings.thinking || !supportsEffort;
   reasoningEffortMenu.replaceChildren();
   if (!supportsEffort) return;
 
@@ -304,8 +307,16 @@ function updateReasoningEffortMenu() {
     option.addEventListener('click', () => {
       webChatSettings.reasoning_effort = effort;
       webChatSettings.reasoning_effort_override = true;
-      updateReasoningEffortMenu();
-      setStatus('推理强度已设置', `下一次 GPT-5.6 请求将使用 ${effort}。`);
+      if (effort === 'none') {
+        webChatSettings.thinking = false;
+        webChatSettings.thinking_override = true;
+      }
+      reasoningEffortMenuOpen = false;
+      updateThinkingButton();
+      setStatus(
+        effort === 'none' ? '思考已关闭' : '推理强度已设置',
+        effort === 'none' ? '下一次 GPT-5.6 请求不会使用推理。' : `下一次 GPT-5.6 请求将使用 ${effort}。`,
+      );
     });
     reasoningEffortMenu.append(option);
   }
@@ -1766,6 +1777,7 @@ forceWebConfigButton.addEventListener('click', () => {
     if (typeof configDefaults.thinking === 'boolean') webChatSettings.thinking = configDefaults.thinking;
     webChatSettings.reasoning_effort_override = false;
     if (typeof configDefaults.reasoning_effort === 'string') webChatSettings.reasoning_effort = configDefaults.reasoning_effort;
+    reasoningEffortMenuOpen = false;
     webChatSettings.long_context_override = false;
     if (typeof configDefaults.long_context_enabled === 'boolean') webChatSettings.long_context_enabled = configDefaults.long_context_enabled;
     setStatus('已切换到 config.txt', '下一次聊天和画图将优先使用配置文件。');
@@ -1778,8 +1790,19 @@ forceWebConfigButton.addEventListener('click', () => {
   updateThinkingButton();
 });
 thinkingButton.addEventListener('click', () => {
-  webChatSettings.thinking = !webChatSettings.thinking;
-  webChatSettings.thinking_override = true;
+  const supportsEffort = isGpt56Model(activeConfiguredModel());
+  if (supportsEffort) {
+    if (!webChatSettings.thinking) {
+      webChatSettings.thinking = true;
+      webChatSettings.thinking_override = true;
+      if (webChatSettings.reasoning_effort === 'none') webChatSettings.reasoning_effort = 'medium';
+    }
+    reasoningEffortMenuOpen = !reasoningEffortMenuOpen;
+  } else {
+    webChatSettings.thinking = !webChatSettings.thinking;
+    webChatSettings.thinking_override = true;
+    reasoningEffortMenuOpen = false;
+  }
   updateThinkingButton();
 });
 webModel.addEventListener('input', updateReasoningEffortMenu);
