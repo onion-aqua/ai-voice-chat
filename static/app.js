@@ -30,6 +30,8 @@ const fileInput = document.querySelector('#file-input');
 const attachButton = document.querySelector('#attach-button');
 const attachmentList = document.querySelector('#attachment-list');
 const forceWebConfigButton = document.querySelector('#force-web-config');
+const longContextToggle = document.querySelector('#long-context-toggle');
+const longContextHelp = document.querySelector('#long-context-help');
 const ttsProgress = document.querySelector('#tts-progress');
 const ttsProgressLabel = document.querySelector('#tts-progress-label');
 const ttsProgressCount = document.querySelector('#tts-progress-count');
@@ -47,7 +49,12 @@ let conversationRecords = [];
 let conversationSaveQueue = Promise.resolve();
 let pendingDeleteId = null;
 let configDefaults = {};
-let webChatSettings = {provider: 'openai_compatible', api_key: '', base_url: '', model: '', thinking: false, thinking_override: false, force_web_config: false};
+let webChatSettings = {
+  provider: 'openai_compatible', api_key: '', base_url: '', model: '',
+  thinking: false, thinking_override: false,
+  long_context_enabled: false, long_context_override: false,
+  force_web_config: false,
+};
 let webImageSettings = {api_key: '', base_url: '', model: 'auto', api_mode: 'auto', responses_model: '', force_web_config: false};
 let isBusy = false;
 let activeRequest = null;
@@ -168,6 +175,18 @@ function updateSettingsSource() {
   settingsSource.textContent = forced
     ? '当前会强制使用本页面填写的聊天和画图接口信息。'
     : '默认优先读取 config.txt；其中缺失的字段会自动使用本页面填写的内容。';
+  updateLongContextButton();
+}
+
+function updateLongContextButton() {
+  const enabled = webChatSettings.long_context_enabled;
+  longContextToggle.classList.toggle('active', enabled);
+  longContextToggle.setAttribute('aria-pressed', String(enabled));
+  longContextToggle.textContent = enabled ? '1M 上下文：已开启' : '1M 上下文：关闭';
+  longContextToggle.title = enabled ? '关闭 1M 上下文模式' : '开启 1M 上下文模式';
+  longContextHelp.textContent = enabled
+    ? '已请求 1M token 级别的上下文预算。仅在当前模型和接口确实支持时使用；超过预算的早期对话仍会自动压缩为要点。'
+    : '常规上下文模式：旧对话超出预算后会自动压缩为要点，不会把 TTS 情感向量或 Live2D 控制数据发送给模型。';
 }
 
 function openSettings() {
@@ -195,6 +214,8 @@ function saveWebSettings() {
     api_key: webApiKey.value.trim(),
     thinking: webChatSettings.thinking,
     thinking_override: webChatSettings.thinking_override,
+    long_context_enabled: webChatSettings.long_context_enabled,
+    long_context_override: webChatSettings.long_context_override,
     force_web_config: webChatSettings.force_web_config,
   };
   webImageSettings = {
@@ -215,7 +236,9 @@ function applyConfigDefaults(defaults = {}, imageDefaults = {}) {
   webChatSettings.base_url = defaults.base_url || webChatSettings.base_url;
   webChatSettings.model = defaults.model || webChatSettings.model;
   if (typeof defaults.thinking === 'boolean') webChatSettings.thinking = defaults.thinking;
+  if (typeof defaults.long_context_enabled === 'boolean') webChatSettings.long_context_enabled = defaults.long_context_enabled;
   webChatSettings.thinking_override = false;
+  webChatSettings.long_context_override = false;
   webChatSettings.force_web_config = false;
   webImageSettings.base_url = imageDefaults.base_url || webImageSettings.base_url;
   webImageSettings.model = imageDefaults.model || webImageSettings.model || 'auto';
@@ -523,7 +546,9 @@ function createConversationId() {
 }
 
 function visibleAssistantText(content) {
-  return String(content).split('\n').map((line) => line.replace(/\s*&&\s*\[[^\n]*\]\s*$/, '')).join('\n').trim();
+  return String(content).split('\n')
+    .map((line) => line.replace(/\s*&&\s*\[[^\n]*?\](?:\s*##\s*\{.*\})?\s*$/, ''))
+    .join('\n').trim();
 }
 
 function savedConversationMessages() {
@@ -675,6 +700,9 @@ function renderSavedConversation(savedMessages) {
       answer.append(line);
     }
     bubble.append(answer);
+    createAssistantSpeechButton(bubble.parentElement, () => {
+      void replayAssistantText(answer.textContent, Array.from(answer.querySelectorAll('.answer-line')));
+    });
     historyIndex += 1;
   }
   messages.scrollTop = 0;
@@ -771,6 +799,73 @@ function addUserMessageActions(article) {
   article.append(actions);
 }
 
+function createAssistantSpeechButton(article, onReplay) {
+  const actions = document.createElement('div');
+  actions.className = 'assistant-actions';
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'assistant-speak-button';
+  button.title = '朗读此回答';
+  button.setAttribute('aria-label', '朗读此回答');
+  button.textContent = '🔊';
+  button.addEventListener('click', () => {
+    if (isBusy) {
+      setStatus('回答仍在生成', '请等待本轮回答完成后再单独朗读。', 'working');
+      return;
+    }
+    onReplay();
+  });
+  actions.append(button);
+  article.append(actions);
+  return button;
+}
+
+function prepareBubbleReplay() {
+  unlockAudio();
+  if (isMuted) {
+    isMuted = false;
+    muteButton.textContent = '🔊';
+    muteButton.title = '暂停自动播放';
+  }
+  stopNarrationPlayback();
+  waitingForInitialNarration = false;
+  narrationStarted = false;
+}
+
+function replayAssistantSegments(segments) {
+  if (!segments.length) return;
+  prepareBubbleReplay();
+  for (const segment of segments) {
+    queueNarration(
+      segment.url,
+      segment.lineElements,
+      segment.speakingSpeed,
+      segment.emotionVector,
+      segment.lineStates,
+    );
+  }
+  setStatus('正在朗读此回答', `已加入 ${segments.length} 段现有录音。`, 'working');
+}
+
+async function replayAssistantText(text, lineElements) {
+  const cleanText = String(text || '').trim();
+  if (!cleanText || !voiceSelect.value) return;
+  prepareBubbleReplay();
+  setStatus('正在生成朗读录音', '正在为这条历史回答生成新的 IndexTTS2 音频。', 'working');
+  try {
+    const response = await fetch('/api/tts', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({text: cleanText, voice: voiceSelect.value, speaking_speed: selectedSpeakingSpeed()}),
+    });
+    const data = await response.json().catch(() => ({}));
+    if (!response.ok || !data.audio) throw new Error(readableError(data.detail || data));
+    queueNarration(data.audio, lineElements, data.speaking_speed || 1, [0, 0, 0, 0, 0, 0, 0, 0.6]);
+  } catch (error) {
+    setStatus('朗读生成失败', error, 'error');
+  }
+}
+
 function createMessage(role, text = '', options = {}) {
   const article = document.createElement('article');
   article.className = `message ${role}`;
@@ -813,7 +908,16 @@ function createAssistantView() {
   answer.className = 'answer-content waiting';
   answer.textContent = '正在生成回答…';
   bubble.append(agent, thinking, answer);
-  return {bubble, agent, agentSummary, agentList, agentSteps: 0, agentItems: new Map(), thinking, summary, thinkingText, answer, search: null, generatedImage: null, lines: new Map(), emotionVectors: new Map(), live2dControls: new Map()};
+  const view = {
+    bubble, agent, agentSummary, agentList, agentSteps: 0, agentItems: new Map(),
+    thinking, summary, thinkingText, answer, search: null, generatedImage: null,
+    lines: new Map(), emotionVectors: new Map(), live2dControls: new Map(), audioSegments: [],
+  };
+  view.speakButton = createAssistantSpeechButton(bubble.parentElement, () => {
+    if (view.audioSegments.length) replayAssistantSegments(view.audioSegments);
+    else void replayAssistantText(view.answer.textContent, Array.from(view.answer.querySelectorAll('.answer-line')));
+  });
+  return view;
 }
 
 function removeHighlights(narration) {
@@ -1483,7 +1587,23 @@ async function ask(message, attachments = []) {
             emotionVector: activeAssistant.emotionVectors.get(String(segment.line_id)),
             live2dControl: activeAssistant.live2dControls.get(String(segment.line_id)),
           }));
-          if (lines.length) queueNarration(data.audio, lines, data.speaking_speed || 1, emotionVector, lineStates);
+          if (lines.length) {
+            const replaySegment = {
+              url: data.audio,
+              lineElements: lines,
+              speakingSpeed: data.speaking_speed || 1,
+              emotionVector,
+              lineStates,
+            };
+            activeAssistant.audioSegments.push(replaySegment);
+            queueNarration(
+              replaySegment.url,
+              replaySegment.lineElements,
+              replaySegment.speakingSpeed,
+              replaySegment.emotionVector,
+              replaySegment.lineStates,
+            );
+          }
         } else if (event === 'tts_progress') {
           showTtsProgress(data);
         } else if (event === 'tts_error') {
@@ -1592,6 +1712,8 @@ forceWebConfigButton.addEventListener('click', () => {
     webImageSettings.force_web_config = false;
     webChatSettings.thinking_override = false;
     if (typeof configDefaults.thinking === 'boolean') webChatSettings.thinking = configDefaults.thinking;
+    webChatSettings.long_context_override = false;
+    if (typeof configDefaults.long_context_enabled === 'boolean') webChatSettings.long_context_enabled = configDefaults.long_context_enabled;
     setStatus('已切换到 config.txt', '下一次聊天和画图将优先使用配置文件。');
   } else {
     webChatSettings.force_web_config = true;
@@ -1605,6 +1727,11 @@ thinkingButton.addEventListener('click', () => {
   webChatSettings.thinking = !webChatSettings.thinking;
   webChatSettings.thinking_override = true;
   updateThinkingButton();
+});
+longContextToggle.addEventListener('click', () => {
+  webChatSettings.long_context_enabled = !webChatSettings.long_context_enabled;
+  webChatSettings.long_context_override = true;
+  updateLongContextButton();
 });
 attachButton.addEventListener('click', () => fileInput.click());
 fileInput.addEventListener('change', () => { void uploadSelectedFiles(fileInput.files); });

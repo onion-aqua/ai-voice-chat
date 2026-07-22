@@ -125,12 +125,16 @@
       </div>
       <div class="settings-options"><button id="force-web-config" class="force-web-config" type="button" aria-pressed="false">强制使用网页配置</button></div>
       <p class="settings-help">默认优先读取 config.txt；点击右侧按钮后，本次页面填写的聊天和画图设置将强制生效。图片模型设为 auto 时会从当前图片接口的模型列表中选择。Sub2API 的 gpt-image-2 出现 502 时，可选 Responses 工具，并填入可用的聊天模型。API Key 不会回显或写入配置文件。</p>
+      <div class="settings-options context-options">
+        <button id="long-context-toggle" class="long-context-toggle" type="button" aria-pressed="false">1M 上下文：关闭</button>
+      </div>
+      <p id="long-context-help" class="settings-help context-help">仅在当前模型和接口确认支持 1M token 上下文时开启。旧对话超出预算后会自动压缩为要点，不会把 TTS 情感向量或 Live2D 控制数据发送给模型。</p>
       <footer class="settings-footer"><button id="save-settings" class="save-settings" type="button">保存本页设置</button></footer>
     </section>
   </div>
   <script defer src="https://cdn.jsdelivr.net/npm/pixi.js@8.18.1/dist/pixi.min.js" crossorigin="anonymous"></script>
   <script defer src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js" crossorigin="anonymous"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/untitled-pixi-live2d-engine@1.3.5/dist/cubism.min.js" crossorigin="anonymous"></script>
-  <script defer src="/static/app.js?v=20260721-local-live2d-hpmask"></script>
+  <script defer src="/static/app.js?v=20260722-context-replay"></script>
 </body>
 </html>

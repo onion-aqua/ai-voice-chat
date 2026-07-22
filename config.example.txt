@@ -7,6 +7,9 @@ base_url = http://127.0.0.1:1234/v1
 model =
 # Optional: true or false. Leave empty to use the model default.
 thinking =
+# Enable only when the selected model and provider really support a 1M-token context window.
+# When disabled, old turns are automatically condensed into key points.
+enable_1m_context = false
 
 [image]
 # Image generation always uses a dedicated image model, never the chat model.

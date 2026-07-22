@@ -64,6 +64,13 @@ TEXT_FILE_EXTENSIONS = {
 }
 IMAGE_FILE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif"}
 AUDIO_RETENTION_COUNT = 10
+# The normal budget keeps request latency and proxy limits reasonable.  The
+# optional long-context switch is deliberately generous, but it still relies
+# on the selected upstream model actually supporting a 1M-token window.
+NORMAL_CONTEXT_CHAR_BUDGET = 96_000
+ONE_MILLION_CONTEXT_CHAR_BUDGET = 3_000_000
+CONTEXT_SUMMARY_CHAR_BUDGET = 8_000
+MAX_CHAT_HISTORY_MESSAGES = 4_096
 IMAGE_MODEL_MARKERS = (
     "gpt-image", "dall-e", "gemini", "qwen-image", "wanx", "flux", "recraft",
     "stable-diffusion", "sdxl", "z-image", "kolors", "cogview", "ideogram", "seedream",
@@ -235,6 +242,10 @@ def load_settings() -> dict:
     if thinking_value and thinking_value not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
         raise RuntimeError("[chat] thinking must be true or false.")
     thinking = None if not thinking_value else thinking_value in {"true", "1", "yes", "on"}
+    long_context_value = value("chat", "enable_1m_context", "false").lower()
+    if long_context_value not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
+        raise RuntimeError("[chat] enable_1m_context must be true or false.")
+    long_context_enabled = long_context_value in {"true", "1", "yes", "on"}
     image_base_url = value("image", "base_url", "").rstrip("/")
     if image_base_url and re.search(r"/(?:models|images/generations)$", image_base_url, flags=re.IGNORECASE):
         raise RuntimeError("[image] base_url 必须是 API 根路径,例如 https://api.openai.com/v1.")
@@ -253,6 +264,7 @@ def load_settings() -> dict:
             "base_url": base_url,
             "model": value("chat", "model", ""),
             "thinking": thinking,
+            "long_context_enabled": long_context_enabled,
         },
         "image": {
             "api_key": value("image", "api_key", ""),
@@ -277,6 +289,8 @@ class WebChatSettings(BaseModel):
     model: str = Field(default="", max_length=300)
     thinking: bool = False
     thinking_override: bool = False
+    long_context_enabled: bool = False
+    long_context_override: bool = False
     force_web_config: bool = False
 
 
@@ -302,7 +316,7 @@ class AttachmentReference(BaseModel):
 
 class ChatRequest(BaseModel):
     message: str = Field(min_length=1, max_length=4000)
-    history: list[dict[str, str]] = Field(default_factory=list, max_length=12)
+    history: list[dict[str, str]] = Field(default_factory=list, max_length=MAX_CHAT_HISTORY_MESSAGES)
     attachments: list[AttachmentReference] = Field(default_factory=list, max_length=MAX_ATTACHMENTS_PER_MESSAGE)
     web_search: bool = False
     location: LocationContext | None = None
@@ -318,6 +332,13 @@ class ImageRequest(BaseModel):
     prompt: str = Field(min_length=1, max_length=4000)
     web_chat: WebChatSettings = Field(default_factory=WebChatSettings)
     web_image: WebImageSettings = Field(default_factory=WebImageSettings)
+
+
+class SpeechRequest(BaseModel):
+    """A replay request for an existing assistant bubble."""
+    text: str = Field(min_length=1, max_length=12_000)
+    voice: str = Field(min_length=1, max_length=160)
+    speaking_speed: float = Field(default=1.0, ge=0.75, le=1.35)
 
 
 def resolve_chat_config_from_web(web: WebChatSettings) -> dict:
@@ -340,6 +361,7 @@ def resolve_chat_config_from_web(web: WebChatSettings) -> dict:
     model = select("model")
     api_key = select("api_key")
     thinking = web.thinking if web.thinking_override or web.force_web_config or not configured_complete or configured.get("thinking") is None else bool(configured["thinking"])
+    long_context_enabled = web.long_context_enabled if web.long_context_override else bool(configured.get("long_context_enabled", False))
 
     if not base_url or not model:
         raise RuntimeError("请在 config.txt 或网页模型设置中填写 base_url 和模型名称.")
@@ -347,7 +369,14 @@ def resolve_chat_config_from_web(web: WebChatSettings) -> dict:
         raise RuntimeError("base_url 必须填写 API 根路径,不能填写 /models 或 /chat/completions.")
     if provider != "lm_studio" and not api_key:
         raise RuntimeError("请在 config.txt 或网页模型设置中填写 API Key.")
-    return {"provider": provider, "base_url": base_url, "model": model, "api_key": api_key, "thinking": thinking}
+    return {
+        "provider": provider,
+        "base_url": base_url,
+        "model": model,
+        "api_key": api_key,
+        "thinking": thinking,
+        "long_context_enabled": long_context_enabled,
+    }
 
 
 def resolve_chat_config(request: ChatRequest) -> dict:
@@ -701,14 +730,14 @@ def generate_image(prompt: str, config: dict, reference_images: list[dict] | Non
 
 class ConversationMessage(BaseModel):
     role: str = Field(min_length=1, max_length=16)
-    content: str = Field(min_length=1, max_length=10000)
-    model_content: str | None = Field(default=None, max_length=12000)
+    content: str = Field(min_length=1, max_length=60_000)
+    model_content: str | None = Field(default=None, max_length=64_000)
 
 
 class ConversationSaveRequest(BaseModel):
     id: str = Field(min_length=1, max_length=80)
     title: str = Field(min_length=1, max_length=120)
-    messages: list[ConversationMessage] = Field(min_length=1, max_length=120)
+    messages: list[ConversationMessage] = Field(min_length=1, max_length=MAX_CHAT_HISTORY_MESSAGES)
 
 
 class IndexTTSService:
@@ -1328,22 +1357,97 @@ def compose_user_content(request: ChatRequest, attachments: list[dict], search_r
     return [{"type": "text", "text": text}, *image_blocks]
 
 
+def visible_assistant_history_text(content: str) -> str:
+    """Strip private TTS and Live2D protocol data before it reaches the model."""
+    visible_lines: list[str] = []
+    for raw_line in content.splitlines():
+        parsed = parse_emotion_line(raw_line)
+        if not parsed:
+            continue
+        text, _, _ = parsed
+        if text.strip():
+            visible_lines.append(text.strip())
+    return "\n".join(visible_lines).strip()
+
+
+def context_excerpt(text: str, maximum: int = 520) -> str:
+    """Make a readable key-point excerpt without an extra model request."""
+    normalized = re.sub(r"\s+", " ", text).strip()
+    if len(normalized) <= maximum:
+        return normalized
+    sentences = [piece.strip() for piece in re.split(r"(?<=[。！？.!?])", normalized) if piece.strip()]
+    excerpt = ""
+    for sentence in sentences:
+        candidate = f"{excerpt} {sentence}".strip()
+        if len(candidate) > maximum - 1:
+            break
+        excerpt = candidate
+    return (excerpt or normalized[: maximum - 1]).rstrip() + "…"
+
+
+def compact_history_context(history: list[dict[str, str]], char_budget: int) -> tuple[str, list[tuple[str, str]]]:
+    """Keep recent turns verbatim and deterministically condense older turns."""
+    cleaned: list[tuple[str, str]] = []
+    for item in history:
+        role = item.get("role") if isinstance(item, dict) else None
+        content = item.get("content") if isinstance(item, dict) else None
+        if role not in {"user", "assistant"} or not isinstance(content, str):
+            continue
+        text = content.strip() if role == "user" else visible_assistant_history_text(content)
+        if text:
+            cleaned.append((role, text))
+
+    if not cleaned:
+        return "", []
+
+    recent_budget = max(8_000, int(char_budget * 0.78))
+    recent_reversed: list[tuple[str, str]] = []
+    older_reversed: list[tuple[str, str]] = []
+    used = 0
+    overflowed = False
+    for role, text in reversed(cleaned):
+        if not overflowed and (used + len(text) <= recent_budget or not recent_reversed):
+            recent_reversed.append((role, text))
+            used += len(text)
+        else:
+            overflowed = True
+            older_reversed.append((role, text))
+
+    recent = list(reversed(recent_reversed))
+    older = list(reversed(older_reversed))
+    if not older:
+        return "", recent
+
+    summary_lines = ["Earlier conversation key points (auto-compressed; do not mention this summary):"]
+    summary_used = len(summary_lines[0])
+    for role, text in older:
+        label = "User" if role == "user" else "Assistant"
+        line = f"- {label}: {context_excerpt(text)}"
+        if summary_used + len(line) + 1 > CONTEXT_SUMMARY_CHAR_BUDGET:
+            summary_lines.append("- Earlier details were compressed to preserve the active topic.")
+            break
+        summary_lines.append(line)
+        summary_used += len(line) + 1
+    return "\n".join(summary_lines), recent
+
+
 def chat_messages(request: ChatRequest, attachments: list[dict] | None = None, search_results: list[dict[str, str]] | None = None) -> list[BaseMessage]:
     """将网页历史转换成 LangChain 的标准消息对象."""
     system_content = f"{SYSTEM_PROMPT}\n\n{TOOL_SYSTEM_PROMPT}" if request.agent_enabled else SYSTEM_PROMPT
     if live2d_prompt := live2d_control_system_prompt(request.live2d_model_id):
         system_content = f"{system_content}\n\n{live2d_prompt}"
+    chat_config = resolve_chat_config(request)
+    char_budget = ONE_MILLION_CONTEXT_CHAR_BUDGET if chat_config["long_context_enabled"] else NORMAL_CONTEXT_CHAR_BUDGET
+    summary, history_items = compact_history_context(request.history, char_budget)
     messages: list[BaseMessage] = [SystemMessage(content=system_content)]
-    for item in request.history[-12:]:
-        role, content = item.get("role"), item.get("content")
-        if role in {"user", "assistant"} and isinstance(content, str) and content.strip():
-            if role == "user":
-                messages.append(HumanMessage(content=content[:4000]))
-            else:
-                # The UI intentionally stores only display text.  Rebuild every
-                # assistant row into the output protocol before showing it to the
-                # model, so a later turn cannot learn a vector-less format.
-                messages.append(AIMessage(content=assistant_history_for_model(content)))
+    if summary:
+        messages.append(SystemMessage(content=summary))
+        print(f"[Context] auto-compressed {len(request.history) - len(history_items)} old history item(s).", flush=True)
+    for role, content in history_items:
+        if role == "user":
+            messages.append(HumanMessage(content=content[:4000]))
+        else:
+            messages.append(AIMessage(content=content))
     messages.append(HumanMessage(content=compose_user_content(request, attachments or [], search_results or [])))
     return messages
 
@@ -1886,6 +1990,19 @@ def create_image(request: ImageRequest):
     return result
 
 
+@app.post("/api/tts")
+def replay_speech(request: SpeechRequest):
+    """Generate a fresh recording when a saved assistant bubble is replayed."""
+    if request.voice not in TTS.voices():
+        raise HTTPException(status_code=400, detail="Selected voice is unavailable.")
+    text = visible_assistant_history_text(request.text) or request.text.strip()
+    if not text:
+        raise HTTPException(status_code=400, detail="There is no readable assistant text to play.")
+    print(f"[TTS] replay chars={tts_text_char_count(text)}", flush=True)
+    audio_name = TTS.synthesize(text, request.voice, DEFAULT_EMOTION_VECTOR.copy(), request.speaking_speed)
+    return {"audio": f"/media/{audio_name}", "speaking_speed": request.speaking_speed}
+
+
 @app.get("/api/status")
 def status():
     voices = TTS.voices()
@@ -1901,6 +2018,7 @@ def status():
             "model": chat_config["model"],
             "api_key_configured": bool(chat_config["api_key"]),
             "thinking": chat_config["thinking"],
+            "long_context_enabled": chat_config["long_context_enabled"],
         },
         "image_defaults": {
             "base_url": image_config["base_url"],
