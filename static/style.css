@@ -61,3 +61,9 @@ body.night-mode .speech-line.active-line { color:#e9f5e4; background:rgba(154,19
 body.night-mode .generated-image,body.night-mode .user-image-preview { border-color:#40544a; background:#17221d; }
 body.night-mode .attachment-chip { border-color:#496555; background:#20352a; color:#c4e2d1; }
 body.night-mode .night-mode-toggle { border-color:#5e8576; background:#20342c; }
+
+/* The level marker is absolutely positioned in the lower free area so the
+   "思考已开" label keeps its original vertical position. */
+.thinking-button { position:relative; }
+.thinking-button-label { position:relative; z-index:1; }
+.thinking-button-indicator { position:absolute; right:0; bottom:4px; left:0; height:8px; color:currentColor; font:10px/8px 'DM Mono',monospace; letter-spacing:2px; opacity:.84; pointer-events:none; text-align:center; }

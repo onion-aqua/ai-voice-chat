@@ -104,6 +104,7 @@ const GPT56_REASONING_EFFORTS = [
   ['high', '高'], ['xhigh', '超高'], ['max', '最大'],
 ];
 const GPT56_REASONING_SPEEDS = [['1x', '1x'], ['1.5x', '1.5x']];
+const GPT56_REASONING_DOT_COUNTS = {low: 1, medium: 2, high: 3, xhigh: 4, max: 5};
 const NIGHT_MODE_STORAGE_KEY = 'ai-voice-chat:night-mode';
 
 const LIVE2D_EMOTIONS = {
@@ -277,10 +278,29 @@ function applyConfigDefaults(defaults = {}, imageDefaults = {}) {
 function updateThinkingButton() {
   const supportsEffort = isGpt56Model(activeConfiguredModel());
   const enabled = webChatSettings.thinking && (!supportsEffort || webChatSettings.reasoning_effort !== 'none');
+  const dotCount = supportsEffort && enabled ? (GPT56_REASONING_DOT_COUNTS[webChatSettings.reasoning_effort] || 0) : 0;
+  const indicator = dotCount ? `${'·'.repeat(dotCount)}${webChatSettings.reasoning_speed === '1.5x' ? '⚡' : ''}` : '';
   thinkingButton.classList.toggle('active', enabled);
   thinkingButton.setAttribute('aria-pressed', String(enabled));
-  thinkingButton.textContent = enabled ? '思考已开' : '思考';
-  thinkingButton.title = supportsEffort ? '选择推理强度与速度' : (enabled ? '关闭思考模式' : '开启思考模式');
+  thinkingButton.replaceChildren();
+  const label = document.createElement('span');
+  label.className = 'thinking-button-label';
+  label.textContent = enabled ? '思考已开' : '思考';
+  thinkingButton.append(label);
+  if (indicator) {
+    const levelIndicator = document.createElement('span');
+    levelIndicator.className = 'thinking-button-indicator';
+    levelIndicator.textContent = indicator;
+    levelIndicator.setAttribute('aria-hidden', 'true');
+    thinkingButton.append(levelIndicator);
+  }
+  const accessibilityLabel = indicator
+    ? `思考已开，推理强度 ${webChatSettings.reasoning_effort}，推理速度 ${webChatSettings.reasoning_speed}`
+    : (enabled ? '思考已开' : '思考');
+  thinkingButton.setAttribute('aria-label', accessibilityLabel);
+  thinkingButton.title = supportsEffort
+    ? (indicator ? `推理强度 ${webChatSettings.reasoning_effort} · 推理速度 ${webChatSettings.reasoning_speed}` : '选择推理强度与速度')
+    : (enabled ? '关闭思考模式' : '开启思考模式');
   updateReasoningEffortMenu();
 }
 
