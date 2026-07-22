@@ -9,6 +9,7 @@ const statusTitle = document.querySelector('#status-title');
 const statusText = document.querySelector('#status-text');
 const statusDot = document.querySelector('#status-dot');
 const muteButton = document.querySelector('#mute-button');
+const nightModeToggle = document.querySelector('#night-mode-toggle');
 const conversationTitle = document.querySelector('#conversation-title');
 const conversationList = document.querySelector('#conversation-list');
 const modelSettingsButton = document.querySelector('#model-settings');
@@ -103,6 +104,7 @@ const GPT56_REASONING_EFFORTS = [
   ['high', '高'], ['xhigh', '超高'], ['max', '最大'],
 ];
 const GPT56_REASONING_SPEEDS = [['1x', '1x'], ['1.5x', '1.5x']];
+const NIGHT_MODE_STORAGE_KEY = 'ai-voice-chat:night-mode';
 
 const LIVE2D_EMOTIONS = {
   calm: {label: '平静待机', icon: '◌', keywords: ['托脸', '喝饮料', '猫猫嘴']},
@@ -280,6 +282,29 @@ function updateThinkingButton() {
   thinkingButton.textContent = enabled ? '思考已开' : '思考';
   thinkingButton.title = supportsEffort ? '选择推理强度与速度' : (enabled ? '关闭思考模式' : '开启思考模式');
   updateReasoningEffortMenu();
+}
+
+function applyNightMode(enabled, {persist = true} = {}) {
+  document.body.classList.toggle('night-mode', enabled);
+  nightModeToggle.classList.toggle('active', enabled);
+  nightModeToggle.setAttribute('aria-checked', String(enabled));
+  nightModeToggle.setAttribute('aria-label', enabled ? '关闭夜间模式' : '开启夜间模式');
+  nightModeToggle.title = enabled ? '关闭夜间模式' : '开启夜间模式';
+  if (!persist) return;
+  try {
+    localStorage.setItem(NIGHT_MODE_STORAGE_KEY, enabled ? 'true' : 'false');
+  } catch {
+    // A privacy-restricted browser may reject storage; the switch still works
+    // until this page is closed.
+  }
+}
+
+function restoreNightMode() {
+  try {
+    applyNightMode(localStorage.getItem(NIGHT_MODE_STORAGE_KEY) === 'true', {persist: false});
+  } catch {
+    applyNightMode(false, {persist: false});
+  }
 }
 
 function isGpt56Model(model) {
@@ -1894,10 +1919,14 @@ muteButton.addEventListener('click', () => {
   else if (currentAudio) currentAudio.play().catch(() => {});
   else playNextNarration();
 });
+nightModeToggle.addEventListener('click', () => {
+  applyNightMode(!document.body.classList.contains('night-mode'));
+});
 document.addEventListener('click', () => {
   if (!isMuted && currentAudio?.paused) currentAudio.play().catch(() => {});
   else playNextNarration();
 });
+restoreNightMode();
 initialize();
 void initializeLive2D();
 updateSpeedLabel();
