@@ -68,6 +68,7 @@ let locationContext = null;
 let locationRequestInFlight = false;
 let live2dApp = null;
 let live2dModel = null;
+let activeLive2DModelId = '';
 let live2dSpeaking = false;
 let live2dExpression = 'calm';
 let live2dNaturalSize = null;
@@ -812,7 +813,7 @@ function createAssistantView() {
   answer.className = 'answer-content waiting';
   answer.textContent = '正在生成回答…';
   bubble.append(agent, thinking, answer);
-  return {bubble, agent, agentSummary, agentList, agentSteps: 0, agentItems: new Map(), thinking, summary, thinkingText, answer, search: null, generatedImage: null, lines: new Map(), emotionVectors: new Map()};
+  return {bubble, agent, agentSummary, agentList, agentSteps: 0, agentItems: new Map(), thinking, summary, thinkingText, answer, search: null, generatedImage: null, lines: new Map(), emotionVectors: new Map(), live2dControls: new Map()};
 }
 
 function removeHighlights(narration) {
@@ -833,6 +834,9 @@ function updateLineHighlight() {
   if (currentNarration.activeIndex >= 0) lineElements[currentNarration.activeIndex]?.classList.remove('active-line');
   lineElements[index]?.classList.add('active-line');
   currentNarration.activeIndex = index;
+  if (live2dSpeaking) {
+    applyLive2DLineState(currentNarration.lineStates?.[index], currentNarration.emotionVector);
+  }
   followNarrationLine(lineElements[index]);
 }
 
@@ -894,6 +898,78 @@ function applyLive2DExpression(vector, force = false) {
   }
 }
 
+function normalizeLive2DControl(control) {
+  if (!control || typeof control !== 'object') return null;
+  const expression = typeof control.expression === 'string' && live2dExpressionNames.includes(control.expression)
+    ? control.expression : null;
+  const manualMotions = Array.isArray(live2dMotionGroups.Manual) ? live2dMotionGroups.Manual : [];
+  const motion = typeof control.motion === 'string' && manualMotions.includes(control.motion)
+    ? control.motion : null;
+  return {expression, motion};
+}
+
+function applyLive2DExpressionName(expressionName) {
+  if (!expressionName || !live2dModel) return false;
+  live2dExpression = `llm:${expressionName}`;
+  live2dLastExpressionName = expressionName;
+  try {
+    Promise.resolve(live2dModel.expression(expressionName)).catch((error) => {
+      console.warn('[Live2D] LLM expression was rejected.', error);
+    });
+    return true;
+  } catch (error) {
+    console.warn('[Live2D] LLM expression could not start.', error);
+    return false;
+  }
+}
+
+function triggerLive2DNamedMotion(motionName) {
+  if (!live2dModel?.motion || !motionName) return false;
+  const manualMotions = Array.isArray(live2dMotionGroups.Manual) ? live2dMotionGroups.Manual : [];
+  const motionIndex = manualMotions.indexOf(motionName);
+  if (motionIndex < 0) return false;
+  if (performance.now() - live2dLastMotionAt < 650 && motionIndex === live2dLastMotionIndex) return false;
+  live2dLastMotionAt = performance.now();
+  live2dLastMotionIndex = motionIndex;
+  try {
+    Promise.resolve(live2dModel.motion('Manual', motionIndex)).catch((error) => {
+      console.warn('[Live2D] LLM motion was rejected.', error);
+    });
+    return true;
+  } catch (error) {
+    console.warn('[Live2D] LLM motion could not start.', error);
+    return false;
+  }
+}
+
+function applyLive2DLineState(lineState, fallbackVector) {
+  const vector = lineState?.emotionVector || fallbackVector;
+  const control = normalizeLive2DControl(lineState?.live2dControl);
+  if (!control) {
+    // Legacy replies without the new metadata retain the emotion-vector demo.
+    applyLive2DExpression(vector, true);
+    triggerLive2DSpeakingMotion(vector);
+    return;
+  }
+
+  if (control.expression) {
+    applyLive2DExpressionName(control.expression);
+  } else {
+    applyLive2DExpression(vector, true);
+  }
+  if (control.motion) triggerLive2DNamedMotion(control.motion);
+
+  if (control.expression || control.motion) {
+    if (live2dEmotionIcon) live2dEmotionIcon.textContent = '✦';
+    if (live2dEmotionLabel) {
+      const parts = [];
+      if (control.expression) parts.push(`表情：${control.expression}`);
+      if (control.motion) parts.push(`动作：${control.motion}`);
+      live2dEmotionLabel.textContent = parts.join(' · ');
+    }
+  }
+}
+
 function triggerLive2DSpeakingMotion(vector) {
   if (!live2dModel?.motion) return;
   const manualMotions = Array.isArray(live2dMotionGroups.Manual) ? live2dMotionGroups.Manual : [];
@@ -919,12 +995,11 @@ function triggerLive2DSpeakingMotion(vector) {
   }
 }
 
-function setLive2DPlaybackState(speaking, vector = null) {
+function setLive2DPlaybackState(speaking, vector = null, lineState = null) {
   live2dSpeaking = Boolean(speaking);
   live2dPanel?.classList.toggle('is-speaking', live2dSpeaking);
   if (live2dSpeaking) {
-    applyLive2DExpression(vector, true);
-    triggerLive2DSpeakingMotion(vector);
+    applyLive2DLineState(lineState, vector);
     setLive2DStatus('朗读同步', 'speaking');
     return;
   }
@@ -1072,6 +1147,7 @@ async function initializeLive2D() {
     app.stage.addChild(model);
     live2dApp = app;
     live2dModel = model;
+    activeLive2DModelId = typeof localModel.id === 'string' ? localModel.id : '';
     live2dExpressionNames = Array.isArray(localModel.expressions) ? localModel.expressions : [];
     live2dMotionGroups = localModel.motion_groups && typeof localModel.motion_groups === 'object' ? localModel.motion_groups : {};
     live2dNaturalSize = {width: Math.max(1, model.width), height: Math.max(1, model.height)};
@@ -1122,7 +1198,7 @@ function playNextNarration() {
   audio.addEventListener('play', () => {
     narrationStarted = true;
     setStatus('正在朗读', '高亮行会随连续语音同步移动。', 'speaking');
-    setLive2DPlaybackState(true, narration.emotionVector);
+    setLive2DPlaybackState(true, narration.emotionVector, narration.lineStates?.[0]);
     updateLineHighlight();
   });
   audio.addEventListener('ended', () => {
@@ -1151,14 +1227,14 @@ function playNextNarration() {
   audio.play().catch(() => setStatus('等待播放许可', '请点击页面任意位置后继续播放。', 'error'));
 }
 
-function queueNarration(url, lineElements, speakingSpeed, emotionVector) {
+function queueNarration(url, lineElements, speakingSpeed, emotionVector, lineStates = []) {
   const weights = lineElements.map((line) => Math.max(1, line.textContent.replace(/\s/g, '').length));
   const audio = new Audio();
   audio.preload = 'auto';
   audio.src = url;
   audio.load();
   audioQueue.push({
-    audio, lineElements, speakingSpeed, emotionVector: normalizedEmotionVector(emotionVector),
+    audio, lineElements, speakingSpeed, emotionVector: normalizedEmotionVector(emotionVector), lineStates,
     weights, totalWeight: weights.reduce((total, value) => total + value, 0), activeIndex: -1,
   });
   playNextNarration();
@@ -1344,6 +1420,7 @@ async function ask(message, attachments = []) {
         web_search: false,
         location: locationContext,
         agent_enabled: true,
+        live2d_model_id: activeLive2DModelId,
         voice: voiceSelect.value,
         speaking_speed: selectedSpeakingSpeed(),
         web_chat: webChatSettings,
@@ -1388,14 +1465,25 @@ async function ask(message, attachments = []) {
           const vector = Array.isArray(data.emotion_vector) && data.emotion_vector.length === 8
             ? data.emotion_vector : [0, 0, 0, 0, 0, 0, 0, 0.6];
           activeAssistant.emotionVectors.set(String(data.line_id), vector);
-          const historyLine = `${data.text}&&${JSON.stringify(vector)}`;
+          activeAssistant.live2dControls.set(
+            String(data.line_id),
+            data.live2d_control && typeof data.live2d_control === 'object' ? data.live2d_control : null,
+          );
+          const live2dControl = activeAssistant.live2dControls.get(String(data.line_id));
+          const historyLine = `${data.text}&&${JSON.stringify(vector)}${live2dControl ? `##${JSON.stringify(live2dControl)}` : ''}`;
           answerForModel = answerForModel ? `${answerForModel}\n${historyLine}` : historyLine;
           if (!activeAssistant.thinking.hidden) activeAssistant.summary.textContent = '思考过程（点击展开）';
         } else if (event === 'audio') {
           const lines = appendSpeechSegments(activeAssistant, data.segments, data.text, data.line_id);
           const emotionVector = Array.isArray(data.emotion_vector)
             ? data.emotion_vector : activeAssistant.emotionVectors.get(String(data.line_id));
-          if (lines.length) queueNarration(data.audio, lines, data.speaking_speed || 1, emotionVector);
+          const speechSegments = Array.isArray(data.segments) && data.segments.length
+            ? data.segments : [{line_id: data.line_id, text: data.text}];
+          const lineStates = speechSegments.map((segment) => ({
+            emotionVector: activeAssistant.emotionVectors.get(String(segment.line_id)),
+            live2dControl: activeAssistant.live2dControls.get(String(segment.line_id)),
+          }));
+          if (lines.length) queueNarration(data.audio, lines, data.speaking_speed || 1, emotionVector, lineStates);
         } else if (event === 'tts_progress') {
           showTtsProgress(data);
         } else if (event === 'tts_error') {

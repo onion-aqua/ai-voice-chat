@@ -41,7 +41,9 @@ CONVERSATIONS_PATH = MEDIA_DIR.parent / "conversations.json"
 CONVERSATIONS_LOCK = threading.Lock()
 DEFAULT_INDEXTTS_HOME = Path(r"D:\yzylauncher-win-Indextts20-260616\win-unpacked\python")
 EMOTION_PROMPT_PATH = APP_DIR / "emotion_output_prompt.txt"
+LIVE2D_CONTROL_PROMPT_PATH = APP_DIR / "live2d_output_prompt.txt"
 EMOTION_DELIMITER = "&&"
+LIVE2D_CONTROL_DELIMITER = "##"
 DEFAULT_EMOTION_VECTOR = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6]
 # Merge consecutive very short streaming rows into a reasonably sized TTS job.
 # Values count visible non-whitespace characters.
@@ -122,13 +124,14 @@ def prune_generated_audio(directory: Path = MEDIA_DIR, keep: int = AUDIO_RETENTI
     return removed
 
 
-def load_system_prompt() -> str:
-    if not EMOTION_PROMPT_PATH.is_file():
-        raise RuntimeError(f"找不到情绪输出约束文件:{EMOTION_PROMPT_PATH}")
-    return EMOTION_PROMPT_PATH.read_text(encoding="utf-8").strip()
+def load_prompt(path: Path, label: str) -> str:
+    if not path.is_file():
+        raise RuntimeError(f"找不到{label}:{path}")
+    return path.read_text(encoding="utf-8").strip()
 
 
-SYSTEM_PROMPT = load_system_prompt()
+SYSTEM_PROMPT = load_prompt(EMOTION_PROMPT_PATH, "情绪输出约束文件")
+LIVE2D_CONTROL_PROMPT = load_prompt(LIVE2D_CONTROL_PROMPT_PATH, "Live2D 输出约束文件")
 TOOL_SYSTEM_PROMPT = """
 你是一个会自主规划和执行的 AI Agent.先理解用户目标,再判断是否需要使用工具;每次工具返回后评估结果,必要时再选择下一步.
 遇到需要最新、可核实或有来源的信息时先调用 web_search;搜索结果只有摘要,需要事实细节、原文内容或确认来源时必须再调用 browse_webpage 读取相关网页正文,不能把搜索摘要当作完整证据.
@@ -306,6 +309,7 @@ class ChatRequest(BaseModel):
     voice: str = Field(min_length=1, max_length=160)
     speaking_speed: float = Field(default=1.0, ge=0.75, le=1.35)
     agent_enabled: bool = True
+    live2d_model_id: str = Field(default="", max_length=1000)
     web_chat: WebChatSettings = Field(default_factory=WebChatSettings)
     web_image: WebImageSettings = Field(default_factory=WebImageSettings)
 
@@ -872,6 +876,56 @@ def local_live2d_models() -> list[dict[str, object]]:
     return models
 
 
+def selected_live2d_model(model_id: str) -> dict[str, object] | None:
+    models = local_live2d_models()
+    if not models:
+        return None
+    normalized_id = model_id.strip()
+    if normalized_id:
+        return next((model for model in models if model["id"] == normalized_id), models[0])
+    return models[0]
+
+
+def live2d_control_catalog(model_id: str) -> tuple[list[str], list[str]]:
+    model = selected_live2d_model(model_id)
+    if not model:
+        return [], []
+    expressions = sorted({str(name) for name in model.get("expressions", []) if isinstance(name, str)})
+    motion_groups = model.get("motion_groups", {})
+    manual_motions = motion_groups.get("Manual", []) if isinstance(motion_groups, dict) else []
+    motions = sorted({str(name) for name in manual_motions if isinstance(name, str)})
+    return expressions, motions
+
+
+def live2d_control_system_prompt(model_id: str) -> str:
+    expressions, motions = live2d_control_catalog(model_id)
+    if not expressions and not motions:
+        return ""
+    # The selected model can contain many cosmetic assets. A bounded catalog
+    # keeps the prompt useful while still exposing the first-class controls.
+    catalog = {
+        "expressions": expressions[:80],
+        "manual_motions": motions[:80],
+    }
+    return (
+        f"{LIVE2D_CONTROL_PROMPT}\n\n"
+        "Live2D 当前模型可用控制项（仅可使用下列精确名称）：\n"
+        f"{json.dumps(catalog, ensure_ascii=False, separators=(',', ':'))}"
+    )
+
+
+def normalize_live2d_control(control: object, model_id: str) -> dict[str, str | None] | None:
+    """Keep LLM avatar commands inside the currently loaded model catalog."""
+    if not isinstance(control, dict):
+        return None
+    expressions, motions = live2d_control_catalog(model_id)
+    expression = control.get("expression")
+    motion = control.get("motion")
+    normalized_expression = expression if isinstance(expression, str) and expression in expressions else None
+    normalized_motion = motion if isinstance(motion, str) and motion in motions else None
+    return {"expression": normalized_expression, "motion": normalized_motion}
+
+
 @app.get("/live2dmodels/{asset_path:path}", include_in_schema=False)
 def serve_local_live2d_asset(asset_path: str):
     """Serve local Cubism resources, augmenting the model descriptor when needed."""
@@ -1277,6 +1331,8 @@ def compose_user_content(request: ChatRequest, attachments: list[dict], search_r
 def chat_messages(request: ChatRequest, attachments: list[dict] | None = None, search_results: list[dict[str, str]] | None = None) -> list[BaseMessage]:
     """将网页历史转换成 LangChain 的标准消息对象."""
     system_content = f"{SYSTEM_PROMPT}\n\n{TOOL_SYSTEM_PROMPT}" if request.agent_enabled else SYSTEM_PROMPT
+    if live2d_prompt := live2d_control_system_prompt(request.live2d_model_id):
+        system_content = f"{system_content}\n\n{live2d_prompt}"
     messages: list[BaseMessage] = [SystemMessage(content=system_content)]
     for item in request.history[-12:]:
         role, content = item.get("role"), item.get("content")
@@ -1413,21 +1469,41 @@ def tool_result_thinking_note(event_type: str, payload: dict) -> str:
     return "智能体已收到工具结果，正在整理回答。\n"
 
 
-def parse_emotion_line(raw_line: str) -> tuple[str, list[float]] | None:
-    """Read `visible text&&[8 emotion values]`, with a calm fallback for bad rows."""
+def parse_live2d_control_suffix(raw_line: str) -> tuple[str, dict | None]:
+    """Separate optional `##{...}` metadata before parsing the emotion vector."""
+    prefix, delimiter, payload = raw_line.rpartition(LIVE2D_CONTROL_DELIMITER)
+    if not delimiter or not payload.lstrip().startswith("{"):
+        return raw_line, None
+    try:
+        parsed = json.loads(payload.strip())
+    except json.JSONDecodeError:
+        return raw_line, None
+    return (prefix, parsed) if isinstance(parsed, dict) else (raw_line, None)
+
+
+def serialize_emotion_line(text: str, vector: list[float], live2d_control: dict[str, str | None] | None = None) -> str:
+    line = f"{text}{EMOTION_DELIMITER}{json.dumps(vector, ensure_ascii=False, separators=(',', ':'))}"
+    if live2d_control is not None:
+        line += f"{LIVE2D_CONTROL_DELIMITER}{json.dumps(live2d_control, ensure_ascii=False, separators=(',', ':'))}"
+    return line
+
+
+def parse_emotion_line(raw_line: str) -> tuple[str, list[float], dict | None] | None:
+    """Read visible text, an emotion vector, and optional Live2D control metadata."""
     raw_line = raw_line.strip()
     if not raw_line:
         return None
 
-    text, delimiter, vector_text = raw_line.rpartition(EMOTION_DELIMITER)
+    protocol_line, live2d_control = parse_live2d_control_suffix(raw_line)
+    text, delimiter, vector_text = protocol_line.rpartition(EMOTION_DELIMITER)
     if not delimiter:
         # Some models occasionally omit one ampersand.  Accept this legacy form
         # while always emitting the canonical && form back into conversation memory.
-        text, delimiter, vector_text = raw_line.rpartition("&")
+        text, delimiter, vector_text = protocol_line.rpartition("&")
     if not delimiter or not text.strip():
-        if is_internal_agent_payload(raw_line):
+        if is_internal_agent_payload(protocol_line):
             return None
-        return raw_line, DEFAULT_EMOTION_VECTOR.copy()
+        return protocol_line, DEFAULT_EMOTION_VECTOR.copy(), live2d_control
     if is_internal_agent_payload(text):
         return None
     try:
@@ -1437,10 +1513,10 @@ def parse_emotion_line(raw_line: str) -> tuple[str, list[float]] | None:
         vector = [float(value) for value in values]
         if not all(math.isfinite(value) for value in vector):
             raise ValueError("vector contains a non-finite number")
-        return text.strip(), [max(0.0, min(1.0, value)) for value in vector]
+        return text.strip(), [max(0.0, min(1.0, value)) for value in vector], live2d_control
     except (TypeError, ValueError, json.JSONDecodeError):
         # Keep the answer readable even if a model misses the output protocol.
-        return text.strip() or raw_line, DEFAULT_EMOTION_VECTOR.copy()
+        return text.strip() or protocol_line, DEFAULT_EMOTION_VECTOR.copy(), live2d_control
 
 
 def assistant_history_for_model(content: str) -> str:
@@ -1450,10 +1526,8 @@ def assistant_history_for_model(content: str) -> str:
         parsed = parse_emotion_line(raw_line)
         if not parsed:
             continue
-        text, vector = parsed
-        protocol_lines.append(
-            f"{text}{EMOTION_DELIMITER}{json.dumps(vector, ensure_ascii=False, separators=(',', ':'))}"
-        )
+        text, vector, live2d_control = parsed
+        protocol_lines.append(serialize_emotion_line(text, vector, live2d_control))
 
     if not protocol_lines:
         return ""
@@ -1561,7 +1635,7 @@ def stream_model(
     image_config_factory=None,
     reference_images: list[dict] | None = None,
     location: LocationContext | None = None,
-) -> Iterator[tuple[str, str, list[float] | None]]:
+) -> Iterator[tuple[str, str, object]]:
     """Stream answers while allowing the model to call search and image tools first."""
     provider = chat_config["provider"]
     api_key = chat_config["api_key"]
@@ -1631,16 +1705,16 @@ def stream_model(
                         yield "thinking", internal_note, None
                     parsed = parse_emotion_line(visible_line)
                     if parsed:
-                        text, vector = parsed
-                        yield "text", text, vector
+                        text, vector, live2d_control = parsed
+                        yield "text", text, {"emotion_vector": vector, "live2d_control": live2d_control}
             visible_line, internal_note = hide_internal_agent_content(text_buffer)
             if internal_note:
                 full_thinking.append(internal_note)
                 yield "thinking", internal_note, None
             parsed = parse_emotion_line(visible_line)
             if parsed:
-                text, vector = parsed
-                yield "text", text, vector
+                text, vector, live2d_control = parsed
+                yield "text", text, {"emotion_vector": vector, "live2d_control": live2d_control}
 
             tool_calls = model_tool_calls(final_chunk)
             if not agent_enabled or not tool_calls:
@@ -1917,7 +1991,7 @@ def chat(request: ChatRequest):
         line_number = 0
         cancel_event = threading.Event()
         completed = False
-        model_events: queue.Queue[tuple[str, str, list[float] | None]] = queue.Queue()
+        model_events: queue.Queue[tuple[str, str, object]] = queue.Queue()
         tts_jobs: queue.Queue[tuple[str, list[float], list[tuple[int, str]], float] | None] = queue.Queue()
         tts_events: queue.Queue[tuple[str, dict]] = queue.Queue()
         attachments: list[dict] = []
@@ -1955,12 +2029,12 @@ def chat(request: ChatRequest):
                     {"content_type": item["content_type"], "data": item["data"]}
                     for item in attachments if item["kind"] == "image"
                 ]
-                for event_type, delta, emotion_vector in stream_model(
+                for event_type, delta, metadata in stream_model(
                     messages, chat_config, request.agent_enabled, image_config_factory, reference_images, request.location,
                 ):
                     if cancel_event.is_set():
                         return
-                    model_events.put((event_type, delta, emotion_vector))
+                    model_events.put((event_type, delta, metadata))
             except Exception as error:
                 model_events.put(("model_error", str(error), None))
             finally:
@@ -2104,7 +2178,7 @@ def chat(request: ChatRequest):
                     break
 
                 try:
-                    event_type, payload, emotion_vector = model_events.get(timeout=0.12)
+                    event_type, payload, metadata = model_events.get(timeout=0.12)
                 except queue.Empty:
                     continue
 
@@ -2135,10 +2209,18 @@ def chat(request: ChatRequest):
                     continue
                 line_number += 1
                 answer = f"{answer}\n{delta}" if answer else delta
-                vector = emotion_vector or DEFAULT_EMOTION_VECTOR.copy()
-                history_line = f"{delta}{EMOTION_DELIMITER}{json.dumps(vector, ensure_ascii=False, separators=(',', ':'))}"
+                raw_vector = metadata.get("emotion_vector") if isinstance(metadata, dict) else metadata
+                vector = raw_vector if isinstance(raw_vector, list) and len(raw_vector) == 8 else DEFAULT_EMOTION_VECTOR.copy()
+                raw_live2d_control = metadata.get("live2d_control") if isinstance(metadata, dict) else None
+                live2d_control = normalize_live2d_control(raw_live2d_control, request.live2d_model_id)
+                history_line = serialize_emotion_line(delta, vector, live2d_control)
                 model_history = f"{model_history}\n{history_line}" if model_history else history_line
-                yield sse("delta", {"text": delta, "line_id": line_number, "emotion_vector": vector})
+                yield sse("delta", {
+                    "text": delta,
+                    "line_id": line_number,
+                    "emotion_vector": vector,
+                    "live2d_control": live2d_control,
+                })
                 yield from accept_tts_line(delta, vector, line_number)
             completed = True
             yield sse("done", {"answer": answer, "model_history": model_history})
