@@ -66,4 +66,4 @@ body.night-mode .night-mode-toggle { border-color:#5e8576; background:#20342c; }
    "思考已开" label keeps its original vertical position. */
 .thinking-button { position:relative; }
 .thinking-button-label { position:relative; z-index:1; }
-.thinking-button-indicator { position:absolute; right:0; bottom:4px; left:0; height:8px; color:currentColor; font:10px/8px 'DM Mono',monospace; letter-spacing:2px; opacity:.84; pointer-events:none; text-align:center; }
+.thinking-button-indicator { position:absolute; right:0; bottom:3px; left:0; height:10px; color:currentColor; font:12px/10px 'DM Mono',monospace; letter-spacing:2px; opacity:.88; pointer-events:none; text-align:center; }
