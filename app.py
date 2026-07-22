@@ -399,6 +399,10 @@ def resolve_chat_config_from_web(web: WebChatSettings) -> dict:
     reasoning_speed = web_reasoning_speed if web.reasoning_speed_override or web.force_web_config or not configured_complete else configured_reasoning_speed
     if reasoning_speed not in REASONING_SPEEDS:
         raise RuntimeError("Unsupported reasoning speed. Choose 1x or 1.5x.")
+    # This preference is deliberately GPT-5.6-only.  Other models continue
+    # using their own provider defaults and never receive a speed setting.
+    if not is_gpt56_model(model):
+        reasoning_speed = "1x"
     long_context_enabled = web.long_context_enabled if web.long_context_override else bool(configured.get("long_context_enabled", False))
 
     if not base_url or not model:
