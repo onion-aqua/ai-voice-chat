@@ -1792,12 +1792,18 @@ forceWebConfigButton.addEventListener('click', () => {
 thinkingButton.addEventListener('click', () => {
   const supportsEffort = isGpt56Model(activeConfiguredModel());
   if (supportsEffort) {
-    if (!webChatSettings.thinking) {
+    if (reasoningEffortMenuOpen) {
+      // The second click is an explicit close action: hide the picker and
+      // disable reasoning for the next request.
+      reasoningEffortMenuOpen = false;
+      webChatSettings.thinking = false;
+      webChatSettings.thinking_override = true;
+    } else {
       webChatSettings.thinking = true;
       webChatSettings.thinking_override = true;
       if (webChatSettings.reasoning_effort === 'none') webChatSettings.reasoning_effort = 'medium';
+      reasoningEffortMenuOpen = true;
     }
-    reasoningEffortMenuOpen = !reasoningEffortMenuOpen;
   } else {
     webChatSettings.thinking = !webChatSettings.thinking;
     webChatSettings.thinking_override = true;
