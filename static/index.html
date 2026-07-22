@@ -68,7 +68,10 @@
           <textarea id="prompt" rows="1" maxlength="4000" placeholder="输入你想问的问题…" aria-label="输入问题"></textarea>
           <input id="file-input" type="file" hidden multiple accept="image/png,image/jpeg,image/webp,image/gif,.txt,.md,.csv,.json,.log,.ini,.yaml,.yml,.xml,.py,.js,.ts,.html,.css,.sql,.java,.c,.cpp,.h,.hpp,.sh,.ps1,.bat,.cmd,.pdf,.docx">
           <button id="attach-button" class="composer-tool" type="button" title="上传图片或文件">附件</button>
-          <button id="thinking-button" class="thinking-button" type="button" aria-pressed="false" title="开启或关闭思考模式">思考</button>
+          <div class="thinking-control">
+            <button id="thinking-button" class="thinking-button" type="button" aria-pressed="false" title="开启或关闭思考模式">思考</button>
+            <div id="reasoning-effort-menu" class="reasoning-effort-menu" hidden aria-label="推理强度"></div>
+          </div>
           <button id="send" class="send-button" type="submit" disabled><span>发送</span><kbd>↵</kbd></button>
         </div>
         <p>Enter 发送 · Shift + Enter 换行 · 单个附件最大 10 MB</p>
@@ -135,6 +138,6 @@
   <script defer src="https://cdn.jsdelivr.net/npm/pixi.js@8.18.1/dist/pixi.min.js" crossorigin="anonymous"></script>
   <script defer src="https://cubism.live2d.com/sdk-web/cubismcore/live2dcubismcore.min.js" crossorigin="anonymous"></script>
   <script defer src="https://cdn.jsdelivr.net/npm/untitled-pixi-live2d-engine@1.3.5/dist/cubism.min.js" crossorigin="anonymous"></script>
-  <script defer src="/static/app.js?v=20260722-context-replay"></script>
+  <script defer src="/static/app.js?v=20260722-reasoning-effort"></script>
 </body>
 </html>

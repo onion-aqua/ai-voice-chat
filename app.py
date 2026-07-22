@@ -45,6 +45,7 @@ LIVE2D_CONTROL_PROMPT_PATH = APP_DIR / "live2d_output_prompt.txt"
 EMOTION_DELIMITER = "&&"
 LIVE2D_CONTROL_DELIMITER = "##"
 DEFAULT_EMOTION_VECTOR = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6]
+GPT56_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
 # Merge consecutive very short streaming rows into a reasonably sized TTS job.
 # Values count visible non-whitespace characters.
 TTS_BATCH_TARGET_CHARS = 48
@@ -112,6 +113,11 @@ def normalize_provider(value: str) -> str:
         "lm_studio": "lm_studio",
     }
     return aliases.get(normalized, normalized)
+
+
+def is_gpt56_model(model: str) -> bool:
+    """Recognize both official IDs and common proxy aliases such as gpt5.6-terra."""
+    return bool(re.search(r"(?:^|[^a-z0-9])gpt[-_.]?5[-_.]?6(?:[-_.]|$)", model.strip().lower()))
 
 
 def prune_generated_audio(directory: Path = MEDIA_DIR, keep: int = AUDIO_RETENTION_COUNT) -> int:
@@ -242,6 +248,10 @@ def load_settings() -> dict:
     if thinking_value and thinking_value not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
         raise RuntimeError("[chat] thinking must be true or false.")
     thinking = None if not thinking_value else thinking_value in {"true", "1", "yes", "on"}
+    reasoning_effort = value("chat", "reasoning_effort", "medium").lower()
+    if reasoning_effort not in GPT56_REASONING_EFFORTS:
+        choices = ", ".join(sorted(GPT56_REASONING_EFFORTS))
+        raise RuntimeError(f"[chat] reasoning_effort must be one of: {choices}.")
     long_context_value = value("chat", "enable_1m_context", "false").lower()
     if long_context_value not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
         raise RuntimeError("[chat] enable_1m_context must be true or false.")
@@ -264,6 +274,7 @@ def load_settings() -> dict:
             "base_url": base_url,
             "model": value("chat", "model", ""),
             "thinking": thinking,
+            "reasoning_effort": reasoning_effort,
             "long_context_enabled": long_context_enabled,
         },
         "image": {
@@ -289,6 +300,8 @@ class WebChatSettings(BaseModel):
     model: str = Field(default="", max_length=300)
     thinking: bool = False
     thinking_override: bool = False
+    reasoning_effort: str = Field(default="medium", max_length=20)
+    reasoning_effort_override: bool = False
     long_context_enabled: bool = False
     long_context_override: bool = False
     force_web_config: bool = False
@@ -361,6 +374,11 @@ def resolve_chat_config_from_web(web: WebChatSettings) -> dict:
     model = select("model")
     api_key = select("api_key")
     thinking = web.thinking if web.thinking_override or web.force_web_config or not configured_complete or configured.get("thinking") is None else bool(configured["thinking"])
+    configured_reasoning_effort = str(configured.get("reasoning_effort", "medium")).strip().lower() or "medium"
+    web_reasoning_effort = web.reasoning_effort.strip().lower() or "medium"
+    reasoning_effort = web_reasoning_effort if web.reasoning_effort_override or web.force_web_config or not configured_complete else configured_reasoning_effort
+    if reasoning_effort not in GPT56_REASONING_EFFORTS:
+        raise RuntimeError("Unsupported reasoning effort. Choose none, low, medium, high, xhigh, or max.")
     long_context_enabled = web.long_context_enabled if web.long_context_override else bool(configured.get("long_context_enabled", False))
 
     if not base_url or not model:
@@ -375,6 +393,7 @@ def resolve_chat_config_from_web(web: WebChatSettings) -> dict:
         "model": model,
         "api_key": api_key,
         "thinking": thinking,
+        "reasoning_effort": reasoning_effort,
         "long_context_enabled": long_context_enabled,
     }
 
@@ -1754,14 +1773,22 @@ def stream_model(
     http_client = httpx.Client(timeout=300, trust_env=use_env_proxy)
     try:
         model_options = {}
-        if chat_config["thinking"]:
+        gpt56_reasoning = provider != "lm_studio" and is_gpt56_model(chat_config["model"])
+        if gpt56_reasoning:
+            # ChatOpenAI sends this as the standard Chat Completions
+            # `reasoning_effort` request parameter.  `none` makes the existing
+            # thinking toggle a real off switch for GPT-5.6 instead of merely
+            # hiding the returned reasoning text.
+            model_options["reasoning_effort"] = chat_config["reasoning_effort"] if chat_config["thinking"] else "none"
+        elif chat_config["thinking"]:
             model_options["extra_body"] = (
                 {"chat_template_kwargs": {"enable_thinking": True}}
                 if provider == "lm_studio" else {"enable_thinking": True}
             )
         print(
             f"[Chat] provider={provider} model={chat_config['model']} "
-            f"thinking={chat_config['thinking']} env_proxy={use_env_proxy}",
+            f"thinking={chat_config['thinking']} reasoning_effort="
+            f"{model_options.get('reasoning_effort', 'provider-default')} env_proxy={use_env_proxy}",
             flush=True,
         )
         chat_model = ChatOpenAI(
@@ -2018,6 +2045,7 @@ def status():
             "model": chat_config["model"],
             "api_key_configured": bool(chat_config["api_key"]),
             "thinking": chat_config["thinking"],
+            "reasoning_effort": chat_config["reasoning_effort"],
             "long_context_enabled": chat_config["long_context_enabled"],
         },
         "image_defaults": {

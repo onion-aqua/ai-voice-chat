@@ -26,6 +26,7 @@ const webImageResponsesModel = document.querySelector('#web-image-responses-mode
 const webImageBaseUrl = document.querySelector('#web-image-base-url');
 const webImageApiKey = document.querySelector('#web-image-api-key');
 const thinkingButton = document.querySelector('#thinking-button');
+const reasoningEffortMenu = document.querySelector('#reasoning-effort-menu');
 const fileInput = document.querySelector('#file-input');
 const attachButton = document.querySelector('#attach-button');
 const attachmentList = document.querySelector('#attachment-list');
@@ -52,6 +53,7 @@ let configDefaults = {};
 let webChatSettings = {
   provider: 'openai_compatible', api_key: '', base_url: '', model: '',
   thinking: false, thinking_override: false,
+  reasoning_effort: 'medium', reasoning_effort_override: false,
   long_context_enabled: false, long_context_override: false,
   force_web_config: false,
 };
@@ -94,6 +96,10 @@ const LIVE2D_ZOOM_MIN = 0.55;
 const LIVE2D_ZOOM_MAX = 2.8;
 const NARRATION_LINE_PAUSE_MS = 260;
 const LIVE2D_SPEAKING_MOTION_COOLDOWN_MS = 1800;
+const GPT56_REASONING_EFFORTS = [
+  ['none', '不推理'], ['low', '低'], ['medium', '中'],
+  ['high', '高'], ['xhigh', '超高'], ['max', '最大'],
+];
 
 const LIVE2D_EMOTIONS = {
   calm: {label: '平静待机', icon: '◌', keywords: ['托脸', '喝饮料', '猫猫嘴']},
@@ -156,6 +162,7 @@ function updateSendButton() {
     sendButton.title = '停止文字与语音输出';
     attachButton.disabled = true;
     thinkingButton.disabled = true;
+    updateReasoningEffortMenu();
     return;
   }
   label.textContent = '发送';
@@ -165,6 +172,7 @@ function updateSendButton() {
   sendButton.title = '发送消息';
   attachButton.disabled = attachmentUploadInProgress;
   thinkingButton.disabled = attachmentUploadInProgress;
+  updateReasoningEffortMenu();
 }
 
 function updateSettingsSource() {
@@ -201,6 +209,7 @@ function openSettings() {
   webImageApiKey.value = webImageSettings.api_key;
   updateSettingsSource();
   settingsModal.hidden = false;
+  updateThinkingButton();
   webModel.focus();
 }
 
@@ -214,6 +223,8 @@ function saveWebSettings() {
     api_key: webApiKey.value.trim(),
     thinking: webChatSettings.thinking,
     thinking_override: webChatSettings.thinking_override,
+    reasoning_effort: webChatSettings.reasoning_effort,
+    reasoning_effort_override: webChatSettings.reasoning_effort_override,
     long_context_enabled: webChatSettings.long_context_enabled,
     long_context_override: webChatSettings.long_context_override,
     force_web_config: webChatSettings.force_web_config,
@@ -236,8 +247,10 @@ function applyConfigDefaults(defaults = {}, imageDefaults = {}) {
   webChatSettings.base_url = defaults.base_url || webChatSettings.base_url;
   webChatSettings.model = defaults.model || webChatSettings.model;
   if (typeof defaults.thinking === 'boolean') webChatSettings.thinking = defaults.thinking;
+  if (typeof defaults.reasoning_effort === 'string') webChatSettings.reasoning_effort = defaults.reasoning_effort;
   if (typeof defaults.long_context_enabled === 'boolean') webChatSettings.long_context_enabled = defaults.long_context_enabled;
   webChatSettings.thinking_override = false;
+  webChatSettings.reasoning_effort_override = false;
   webChatSettings.long_context_override = false;
   webChatSettings.force_web_config = false;
   webImageSettings.base_url = imageDefaults.base_url || webImageSettings.base_url;
@@ -257,6 +270,45 @@ function updateThinkingButton() {
   thinkingButton.setAttribute('aria-pressed', String(enabled));
   thinkingButton.textContent = enabled ? '思考已开' : '思考';
   thinkingButton.title = enabled ? '关闭思考模式' : '开启思考模式';
+  updateReasoningEffortMenu();
+}
+
+function isGpt56Model(model) {
+  return /(?:^|[^a-z0-9])gpt[-_.]?5[-_.]?6(?:[-_.]|$)/i.test(String(model || '').trim());
+}
+
+function activeConfiguredModel() {
+  const modalModel = settingsModal.hidden ? '' : webModel.value;
+  return (modalModel || webChatSettings.model || configDefaults.model || '').trim();
+}
+
+function updateReasoningEffortMenu() {
+  const supportsEffort = isGpt56Model(activeConfiguredModel());
+  reasoningEffortMenu.hidden = !webChatSettings.thinking || !supportsEffort;
+  reasoningEffortMenu.replaceChildren();
+  if (!supportsEffort) return;
+
+  const label = document.createElement('span');
+  label.className = 'reasoning-effort-label';
+  label.textContent = '推理强度';
+  reasoningEffortMenu.append(label);
+  for (const [effort, name] of GPT56_REASONING_EFFORTS) {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'reasoning-effort-option';
+    option.classList.toggle('active', webChatSettings.reasoning_effort === effort);
+    option.textContent = name;
+    option.title = `${effort} 推理强度`;
+    option.setAttribute('aria-pressed', String(webChatSettings.reasoning_effort === effort));
+    option.disabled = isBusy || attachmentUploadInProgress;
+    option.addEventListener('click', () => {
+      webChatSettings.reasoning_effort = effort;
+      webChatSettings.reasoning_effort_override = true;
+      updateReasoningEffortMenu();
+      setStatus('推理强度已设置', `下一次 GPT-5.6 请求将使用 ${effort}。`);
+    });
+    reasoningEffortMenu.append(option);
+  }
 }
 
 function needsCurrentLocation(message) {
@@ -1712,6 +1764,8 @@ forceWebConfigButton.addEventListener('click', () => {
     webImageSettings.force_web_config = false;
     webChatSettings.thinking_override = false;
     if (typeof configDefaults.thinking === 'boolean') webChatSettings.thinking = configDefaults.thinking;
+    webChatSettings.reasoning_effort_override = false;
+    if (typeof configDefaults.reasoning_effort === 'string') webChatSettings.reasoning_effort = configDefaults.reasoning_effort;
     webChatSettings.long_context_override = false;
     if (typeof configDefaults.long_context_enabled === 'boolean') webChatSettings.long_context_enabled = configDefaults.long_context_enabled;
     setStatus('已切换到 config.txt', '下一次聊天和画图将优先使用配置文件。');
@@ -1728,6 +1782,7 @@ thinkingButton.addEventListener('click', () => {
   webChatSettings.thinking_override = true;
   updateThinkingButton();
 });
+webModel.addEventListener('input', updateReasoningEffortMenu);
 longContextToggle.addEventListener('click', () => {
   webChatSettings.long_context_enabled = !webChatSettings.long_context_enabled;
   webChatSettings.long_context_override = true;
