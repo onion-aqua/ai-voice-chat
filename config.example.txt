@@ -9,6 +9,9 @@ model =
 thinking =
 # GPT-5.6 only: none, low, medium, high, xhigh, or max. Used when thinking is true.
 reasoning_effort = medium
+# 1x uses the default service level. 1.5x requests OpenAI priority only when
+# connecting directly to api.openai.com; compatible proxies receive no extra field.
+reasoning_speed = 1x
 # Enable only when the selected model and provider really support a 1M-token context window.
 # When disabled, old turns are automatically condensed into key points.
 enable_1m_context = false

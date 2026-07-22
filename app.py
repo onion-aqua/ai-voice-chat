@@ -46,6 +46,10 @@ EMOTION_DELIMITER = "&&"
 LIVE2D_CONTROL_DELIMITER = "##"
 DEFAULT_EMOTION_VECTOR = [0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.6]
 GPT56_REASONING_EFFORTS = {"none", "low", "medium", "high", "xhigh", "max"}
+# "1x" and "1.5x" are UI-facing speed choices.  OpenAI's public API does
+# not expose a numeric inference-speed field; on the official endpoint only,
+# 1.5x asks for the documented priority service tier.
+REASONING_SPEEDS = {"1x", "1.5x"}
 # Merge consecutive very short streaming rows into a reasonably sized TTS job.
 # Values count visible non-whitespace characters.
 TTS_BATCH_TARGET_CHARS = 48
@@ -118,6 +122,11 @@ def normalize_provider(value: str) -> str:
 def is_gpt56_model(model: str) -> bool:
     """Recognize both official IDs and common proxy aliases such as gpt5.6-terra."""
     return bool(re.search(r"(?:^|[^a-z0-9])gpt[-_.]?5[-_.]?6(?:[-_.]|$)", model.strip().lower()))
+
+
+def is_official_openai_api(base_url: str) -> bool:
+    """Whether a request is going directly to the public OpenAI API."""
+    return (urlparse(base_url).hostname or "").strip().lower() == "api.openai.com"
 
 
 def prune_generated_audio(directory: Path = MEDIA_DIR, keep: int = AUDIO_RETENTION_COUNT) -> int:
@@ -252,6 +261,9 @@ def load_settings() -> dict:
     if reasoning_effort not in GPT56_REASONING_EFFORTS:
         choices = ", ".join(sorted(GPT56_REASONING_EFFORTS))
         raise RuntimeError(f"[chat] reasoning_effort must be one of: {choices}.")
+    reasoning_speed = value("chat", "reasoning_speed", "1x").lower()
+    if reasoning_speed not in REASONING_SPEEDS:
+        raise RuntimeError("[chat] reasoning_speed must be 1x or 1.5x.")
     long_context_value = value("chat", "enable_1m_context", "false").lower()
     if long_context_value not in {"true", "false", "1", "0", "yes", "no", "on", "off"}:
         raise RuntimeError("[chat] enable_1m_context must be true or false.")
@@ -275,6 +287,7 @@ def load_settings() -> dict:
             "model": value("chat", "model", ""),
             "thinking": thinking,
             "reasoning_effort": reasoning_effort,
+            "reasoning_speed": reasoning_speed,
             "long_context_enabled": long_context_enabled,
         },
         "image": {
@@ -302,6 +315,8 @@ class WebChatSettings(BaseModel):
     thinking_override: bool = False
     reasoning_effort: str = Field(default="medium", max_length=20)
     reasoning_effort_override: bool = False
+    reasoning_speed: str = Field(default="1x", max_length=8)
+    reasoning_speed_override: bool = False
     long_context_enabled: bool = False
     long_context_override: bool = False
     force_web_config: bool = False
@@ -379,6 +394,11 @@ def resolve_chat_config_from_web(web: WebChatSettings) -> dict:
     reasoning_effort = web_reasoning_effort if web.reasoning_effort_override or web.force_web_config or not configured_complete else configured_reasoning_effort
     if reasoning_effort not in GPT56_REASONING_EFFORTS:
         raise RuntimeError("Unsupported reasoning effort. Choose none, low, medium, high, xhigh, or max.")
+    configured_reasoning_speed = str(configured.get("reasoning_speed", "1x")).strip().lower() or "1x"
+    web_reasoning_speed = web.reasoning_speed.strip().lower() or "1x"
+    reasoning_speed = web_reasoning_speed if web.reasoning_speed_override or web.force_web_config or not configured_complete else configured_reasoning_speed
+    if reasoning_speed not in REASONING_SPEEDS:
+        raise RuntimeError("Unsupported reasoning speed. Choose 1x or 1.5x.")
     long_context_enabled = web.long_context_enabled if web.long_context_override else bool(configured.get("long_context_enabled", False))
 
     if not base_url or not model:
@@ -394,6 +414,7 @@ def resolve_chat_config_from_web(web: WebChatSettings) -> dict:
         "api_key": api_key,
         "thinking": thinking,
         "reasoning_effort": reasoning_effort,
+        "reasoning_speed": reasoning_speed,
         "long_context_enabled": long_context_enabled,
     }
 
@@ -1780,6 +1801,11 @@ def stream_model(
             # thinking toggle a real off switch for GPT-5.6 instead of merely
             # hiding the returned reasoning text.
             model_options["reasoning_effort"] = chat_config["reasoning_effort"] if chat_config["thinking"] else "none"
+            # The public API has no numeric "1.5x" field.  Its priority tier
+            # is the closest documented option, and must not be forwarded to
+            # LAN/proxy endpoints that may reject unfamiliar parameters.
+            if chat_config["reasoning_speed"] == "1.5x" and is_official_openai_api(chat_config["base_url"]):
+                model_options["service_tier"] = "priority"
         elif chat_config["thinking"]:
             model_options["extra_body"] = (
                 {"chat_template_kwargs": {"enable_thinking": True}}
@@ -1788,7 +1814,9 @@ def stream_model(
         print(
             f"[Chat] provider={provider} model={chat_config['model']} "
             f"thinking={chat_config['thinking']} reasoning_effort="
-            f"{model_options.get('reasoning_effort', 'provider-default')} env_proxy={use_env_proxy}",
+            f"{model_options.get('reasoning_effort', 'provider-default')} reasoning_speed="
+            f"{chat_config['reasoning_speed']} service_tier={model_options.get('service_tier', 'default')} "
+            f"env_proxy={use_env_proxy}",
             flush=True,
         )
         chat_model = ChatOpenAI(
@@ -2046,6 +2074,7 @@ def status():
             "api_key_configured": bool(chat_config["api_key"]),
             "thinking": chat_config["thinking"],
             "reasoning_effort": chat_config["reasoning_effort"],
+            "reasoning_speed": chat_config["reasoning_speed"],
             "long_context_enabled": chat_config["long_context_enabled"],
         },
         "image_defaults": {

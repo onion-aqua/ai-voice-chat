@@ -54,6 +54,7 @@ let webChatSettings = {
   provider: 'openai_compatible', api_key: '', base_url: '', model: '',
   thinking: false, thinking_override: false,
   reasoning_effort: 'medium', reasoning_effort_override: false,
+  reasoning_speed: '1x', reasoning_speed_override: false,
   long_context_enabled: false, long_context_override: false,
   force_web_config: false,
 };
@@ -101,6 +102,7 @@ const GPT56_REASONING_EFFORTS = [
   ['none', '不推理'], ['low', '低'], ['medium', '中'],
   ['high', '高'], ['xhigh', '超高'], ['max', '最大'],
 ];
+const GPT56_REASONING_SPEEDS = [['1x', '1x'], ['1.5x', '1.5x']];
 
 const LIVE2D_EMOTIONS = {
   calm: {label: '平静待机', icon: '◌', keywords: ['托脸', '喝饮料', '猫猫嘴']},
@@ -226,6 +228,8 @@ function saveWebSettings() {
     thinking_override: webChatSettings.thinking_override,
     reasoning_effort: webChatSettings.reasoning_effort,
     reasoning_effort_override: webChatSettings.reasoning_effort_override,
+    reasoning_speed: webChatSettings.reasoning_speed,
+    reasoning_speed_override: webChatSettings.reasoning_speed_override,
     long_context_enabled: webChatSettings.long_context_enabled,
     long_context_override: webChatSettings.long_context_override,
     force_web_config: webChatSettings.force_web_config,
@@ -250,9 +254,11 @@ function applyConfigDefaults(defaults = {}, imageDefaults = {}) {
   webChatSettings.model = defaults.model || webChatSettings.model;
   if (typeof defaults.thinking === 'boolean') webChatSettings.thinking = defaults.thinking;
   if (typeof defaults.reasoning_effort === 'string') webChatSettings.reasoning_effort = defaults.reasoning_effort;
+  if (typeof defaults.reasoning_speed === 'string') webChatSettings.reasoning_speed = defaults.reasoning_speed;
   if (typeof defaults.long_context_enabled === 'boolean') webChatSettings.long_context_enabled = defaults.long_context_enabled;
   webChatSettings.thinking_override = false;
   webChatSettings.reasoning_effort_override = false;
+  webChatSettings.reasoning_speed_override = false;
   webChatSettings.long_context_override = false;
   webChatSettings.force_web_config = false;
   webImageSettings.base_url = imageDefaults.base_url || webImageSettings.base_url;
@@ -267,11 +273,12 @@ function applyConfigDefaults(defaults = {}, imageDefaults = {}) {
 }
 
 function updateThinkingButton() {
-  const enabled = webChatSettings.thinking;
+  const supportsEffort = isGpt56Model(activeConfiguredModel());
+  const enabled = webChatSettings.thinking && (!supportsEffort || webChatSettings.reasoning_effort !== 'none');
   thinkingButton.classList.toggle('active', enabled);
   thinkingButton.setAttribute('aria-pressed', String(enabled));
   thinkingButton.textContent = enabled ? '思考已开' : '思考';
-  thinkingButton.title = enabled ? '关闭思考模式' : '开启思考模式';
+  thinkingButton.title = supportsEffort ? '选择推理强度与速度' : (enabled ? '关闭思考模式' : '开启思考模式');
   updateReasoningEffortMenu();
 }
 
@@ -287,14 +294,16 @@ function activeConfiguredModel() {
 function updateReasoningEffortMenu() {
   const supportsEffort = isGpt56Model(activeConfiguredModel());
   if (!supportsEffort) reasoningEffortMenuOpen = false;
-  reasoningEffortMenu.hidden = !reasoningEffortMenuOpen || !webChatSettings.thinking || !supportsEffort;
+  reasoningEffortMenu.hidden = !reasoningEffortMenuOpen || !supportsEffort;
   reasoningEffortMenu.replaceChildren();
   if (!supportsEffort) return;
 
+  const effortGroup = document.createElement('div');
+  effortGroup.className = 'reasoning-effort-group';
   const label = document.createElement('span');
   label.className = 'reasoning-effort-label';
   label.textContent = '推理强度';
-  reasoningEffortMenu.append(label);
+  effortGroup.append(label);
   for (const [effort, name] of GPT56_REASONING_EFFORTS) {
     const option = document.createElement('button');
     option.type = 'button';
@@ -307,19 +316,59 @@ function updateReasoningEffortMenu() {
     option.addEventListener('click', () => {
       webChatSettings.reasoning_effort = effort;
       webChatSettings.reasoning_effort_override = true;
-      if (effort === 'none') {
-        webChatSettings.thinking = false;
-        webChatSettings.thinking_override = true;
-      }
+      // The selected level decides whether reasoning is enabled.  Opening or
+      // closing the menu itself never changes the active setting.
+      webChatSettings.thinking = effort !== 'none';
+      webChatSettings.thinking_override = true;
       reasoningEffortMenuOpen = false;
       updateThinkingButton();
       setStatus(
-        effort === 'none' ? '思考已关闭' : '推理强度已设置',
-        effort === 'none' ? '下一次 GPT-5.6 请求不会使用推理。' : `下一次 GPT-5.6 请求将使用 ${effort}。`,
+        effort === 'none' ? '思考已关闭' : '思考已开启',
+        effort === 'none' ? '下一次 GPT-5.6 请求不会使用推理。' : `下一次 GPT-5.6 请求将使用 ${effort} 推理强度。`,
       );
     });
-    reasoningEffortMenu.append(option);
+    effortGroup.append(option);
   }
+  reasoningEffortMenu.append(effortGroup);
+
+  const divider = document.createElement('span');
+  divider.className = 'reasoning-speed-divider';
+  divider.setAttribute('aria-hidden', 'true');
+  reasoningEffortMenu.append(divider);
+
+  const speedGroup = document.createElement('div');
+  speedGroup.className = 'reasoning-speed-group';
+  const speedLabel = document.createElement('span');
+  speedLabel.className = 'reasoning-effort-label';
+  speedLabel.textContent = '推理速度';
+  speedGroup.append(speedLabel);
+  for (const [speed, name] of GPT56_REASONING_SPEEDS) {
+    const option = document.createElement('button');
+    option.type = 'button';
+    option.className = 'reasoning-speed-option';
+    option.classList.toggle('active', webChatSettings.reasoning_speed === speed);
+    option.textContent = name;
+    option.title = speed === '1.5x'
+      ? '官方 OpenAI API 将请求 priority 服务层；其他兼容接口保持原请求'
+      : '使用默认服务层';
+    option.setAttribute('aria-pressed', String(webChatSettings.reasoning_speed === speed));
+    option.disabled = isBusy || attachmentUploadInProgress;
+    option.addEventListener('click', () => {
+      webChatSettings.reasoning_speed = speed;
+      webChatSettings.reasoning_speed_override = true;
+      // Keep the picker open so a speed can be chosen before the reasoning
+      // level.  The two buttons are rendered as a single-choice group.
+      updateReasoningEffortMenu();
+      setStatus(
+        `推理速度已设为 ${speed}`,
+        speed === '1.5x'
+          ? '直连官方 OpenAI API 时将请求 priority 服务层；兼容接口不会收到未知速度参数。'
+          : '下一次请求将使用默认服务层。',
+      );
+    });
+    speedGroup.append(option);
+  }
+  reasoningEffortMenu.append(speedGroup);
 }
 
 function needsCurrentLocation(message) {
@@ -1777,6 +1826,8 @@ forceWebConfigButton.addEventListener('click', () => {
     if (typeof configDefaults.thinking === 'boolean') webChatSettings.thinking = configDefaults.thinking;
     webChatSettings.reasoning_effort_override = false;
     if (typeof configDefaults.reasoning_effort === 'string') webChatSettings.reasoning_effort = configDefaults.reasoning_effort;
+    webChatSettings.reasoning_speed_override = false;
+    if (typeof configDefaults.reasoning_speed === 'string') webChatSettings.reasoning_speed = configDefaults.reasoning_speed;
     reasoningEffortMenuOpen = false;
     webChatSettings.long_context_override = false;
     if (typeof configDefaults.long_context_enabled === 'boolean') webChatSettings.long_context_enabled = configDefaults.long_context_enabled;
@@ -1792,18 +1843,9 @@ forceWebConfigButton.addEventListener('click', () => {
 thinkingButton.addEventListener('click', () => {
   const supportsEffort = isGpt56Model(activeConfiguredModel());
   if (supportsEffort) {
-    if (reasoningEffortMenuOpen) {
-      // The second click is an explicit close action: hide the picker and
-      // disable reasoning for the next request.
-      reasoningEffortMenuOpen = false;
-      webChatSettings.thinking = false;
-      webChatSettings.thinking_override = true;
-    } else {
-      webChatSettings.thinking = true;
-      webChatSettings.thinking_override = true;
-      if (webChatSettings.reasoning_effort === 'none') webChatSettings.reasoning_effort = 'medium';
-      reasoningEffortMenuOpen = true;
-    }
+    // GPT-5.6 uses this button only as the picker trigger.  The user chooses
+    // "不推理" to turn it off or any other level to turn it on.
+    reasoningEffortMenuOpen = !reasoningEffortMenuOpen;
   } else {
     webChatSettings.thinking = !webChatSettings.thinking;
     webChatSettings.thinking_override = true;
