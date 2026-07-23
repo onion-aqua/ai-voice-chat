@@ -3,6 +3,7 @@ import { computed, nextTick, onBeforeUnmount, onMounted, reactive, ref, watch } 
 import AppSidebar from './components/AppSidebar.vue'
 import ChatComposer from './components/ChatComposer.vue'
 import ChatMessage from './components/ChatMessage.vue'
+import ComputerControlMenu from './components/ComputerControlMenu.vue'
 import Live2DPanel from './components/Live2DPanel.vue'
 import SettingsDialog from './components/SettingsDialog.vue'
 import { createId, requestJson, shortTitle, streamSse } from './lib/api'
@@ -28,6 +29,9 @@ const activeLive2DControl = ref(null)
 const status = reactive({ title: '正在连接服务', detail: '先读取 config.txt 中的默认配置。', kind: 'working' })
 const chatSettings = reactive({ provider: 'openai_compatible', api_key: '', base_url: '', model: '', thinking: false, thinking_override: false, reasoning_effort: 'none', reasoning_effort_override: false, reasoning_speed: '1x', reasoning_speed_override: false, long_context_enabled: false, long_context_override: false, force_web_config: false })
 const imageSettings = reactive({ api_key: '', base_url: '', model: '', api_mode: 'images', responses_model: '', force_web_config: false })
+const appearanceSettings = reactive(loadAppearanceSettings())
+const appearancePreview = reactive({ ...appearanceSettings })
+const computerControl = reactive(loadComputerControl())
 const forceWebConfig = ref(false)
 const pendingAttachments = ref([])
 const audioQueue = []
@@ -39,6 +43,38 @@ let textRenderTimer = null
 
 const isGpt56 = computed(() => /gpt[-_ ]?5[._-]?6/i.test(chatSettings.model || ''))
 const isReady = computed(() => Boolean(voice.value))
+const appearanceVars = computed(() => {
+  const palettes = {
+    jade: { light: ['#2e7a65', '#dfeee6'], dark: ['#69ba95', '#1c3d2e'] },
+    sky: { light: ['#3478b8', '#dfebf8'], dark: ['#6eafe7', '#1d3850'] },
+    violet: { light: ['#7256b1', '#ebe5f7'], dark: ['#ad92e6', '#382b56'] },
+    coral: { light: ['#c66748', '#fae5dc'], dark: ['#ee9b7c', '#542f25'] },
+    indigo: { light: ['#4660aa', '#e3e8f8'], dark: ['#9aacef', '#27345d'] },
+    amber: { light: ['#b7791f', '#fff0cf'], dark: ['#f0bc62', '#533614'] },
+    rose: { light: ['#b54d72', '#f9e1ea'], dark: ['#ec8bb1', '#532337'] },
+  }
+  const baseColorPalettes = {
+    sage: { light: { page: '#f7f8f1', surface: '#fbfcf8', soft: '#eff3ea', line: '#dce3d6' }, dark: { page: '#121816', surface: '#19221e', soft: '#233029', line: '#34463d' } },
+    sky: { light: { page: '#f2f7fb', surface: '#fbfdff', soft: '#e7f1f8', line: '#d7e4ee' }, dark: { page: '#121a20', surface: '#17232b', soft: '#20303a', line: '#344853' } },
+    sand: { light: { page: '#fbf6ed', surface: '#fffdf9', soft: '#f6eddf', line: '#e8dccb' }, dark: { page: '#1d1915', surface: '#28231e', soft: '#352d25', line: '#4b4035' } },
+    lavender: { light: { page: '#f6f3fb', surface: '#fdfbff', soft: '#eee9f7', line: '#dfd7ed' }, dark: { page: '#191720', surface: '#24202d', soft: '#312a3e', line: '#463d57' } },
+    blossom: { light: { page: '#fdf3f5', surface: '#fffafb', soft: '#f8e8ed', line: '#ecd7de' }, dark: { page: '#20171a', surface: '#2c2025', soft: '#3a2a30', line: '#543b44' } },
+    peach: { light: { page: '#fff5ef', surface: '#fffaf7', soft: '#f9e9de', line: '#edd7c9' }, dark: { page: '#211915', surface: '#2e211c', soft: '#3e2b23', line: '#584033' } },
+    glacier: { light: { page: '#f0f8f8', surface: '#fbfefe', soft: '#e4f2f1', line: '#d2e4e3' }, dark: { page: '#142020', surface: '#1d2a2a', soft: '#283737', line: '#3d5050' } },
+    graphite: { light: { page: '#f4f5f6', surface: '#fdfdfd', soft: '#eceef0', line: '#dce0e3' }, dark: { page: '#16181a', surface: '#202326', soft: '#2a2e32', line: '#3c4247' } },
+  }
+  const palette = palettes[appearancePreview.accent] || palettes.jade
+  const [brand, brandSoft] = darkMode.value ? palette.dark : palette.light
+  const base = (baseColorPalettes[appearancePreview.baseColor] || baseColorPalettes.sage)[darkMode.value ? 'dark' : 'light']
+  return {
+    '--brand': brand,
+    '--brand-soft': brandSoft,
+    '--page': base.page,
+    '--surface': base.surface,
+    '--surface-soft': base.soft,
+    '--line': base.line,
+  }
+})
 const currentHistory = computed(() => messages.value
   .filter((item) => item.role === 'user' || (item.role === 'assistant' && item.text))
   .map((item) => ({ role: item.role, content: item.role === 'assistant' ? (item.modelContent || item.text) : item.text })))
@@ -50,6 +86,55 @@ function setStatus(title, detail = '', kind = 'ready') {
   status.title = title
   status.detail = detail
   status.kind = kind
+}
+
+function loadAppearanceSettings() {
+  const fallback = { accent: 'jade', baseColor: 'sage', background: 'glow' }
+  try {
+    const saved = JSON.parse(localStorage.getItem('ai-voice-chat-vue-appearance') || '{}')
+    const accents = new Set(['jade', 'sky', 'violet', 'coral', 'indigo', 'amber', 'rose'])
+    const baseColors = new Set(['sage', 'sky', 'sand', 'lavender', 'blossom', 'peach', 'glacier', 'graphite'])
+    const backgrounds = new Set(['glow', 'plain', 'mist'])
+    return {
+      accent: accents.has(saved.accent) ? saved.accent : fallback.accent,
+      baseColor: baseColors.has(saved.baseColor) ? saved.baseColor : fallback.baseColor,
+      background: backgrounds.has(saved.background) ? saved.background : fallback.background,
+    }
+  } catch {
+    return fallback
+  }
+}
+
+function loadComputerControl() {
+  const modes = new Set(['ask', 'review', 'full'])
+  const saved = localStorage.getItem('ai-voice-chat-vue-computer-control')
+  return { mode: modes.has(saved) ? saved : 'review' }
+}
+
+function updateComputerControl(mode) {
+  computerControl.mode = mode
+  localStorage.setItem('ai-voice-chat-vue-computer-control', mode)
+  const labels = { ask: '请求批准', review: '替我审批', full: '完全访问权限' }
+  const details = {
+    ask: '联网和电脑操作会在执行前请求批准。',
+    review: '低风险查询可自动执行，写入和桌面操作会请求批准。',
+    full: '已允许本轮电脑操作；屏幕和文件内容可能会发送给当前模型。',
+  }
+  setStatus(`电脑控制：${labels[mode]}`, details[mode])
+}
+
+function openSettings() {
+  Object.assign(appearancePreview, appearanceSettings)
+  settingsOpen.value = true
+}
+
+function previewAppearance(data) {
+  Object.assign(appearancePreview, data)
+}
+
+function closeSettings() {
+  Object.assign(appearancePreview, appearanceSettings)
+  settingsOpen.value = false
 }
 
 async function loadStatus() {
@@ -407,6 +492,7 @@ async function sendMessage(text, existingAttachments = pendingAttachments.value)
       location,
       agent_enabled: true,
       live2d_model_id: activeLive2DModelId.value || null,
+      computer_control: { ...computerControl },
       voice: voice.value,
       speaking_speed: speakingSpeed.value,
       web_chat: { ...chatSettings, thinking: chatSettings.reasoning_effort !== 'none', force_web_config: forceWebConfig.value },
@@ -418,6 +504,8 @@ async function sendMessage(text, existingAttachments = pendingAttachments.value)
       if (event === 'agent_step') assistant.agentSteps.push(typeof data === 'string' ? data : (data.message || JSON.stringify(data)))
       if (event === 'search_results') assistant.searchResults = data.results || []
       if (event === 'image' && (data.url || typeof data === 'string')) assistant.images.push(data)
+      if (event === 'computer_screenshot' && data.url) assistant.images.push({ url: data.url, label: '电脑屏幕截图' })
+      if (event === 'computer_approval') { assistant.status = data.message || '电脑操作等待批准'; assistant.agentSteps.push(data.message || '电脑操作等待批准') }
       if (event === 'delta') { appendDelta(assistant, data); assistant.status = '' }
       if (event === 'audio') enqueueAudio(data, assistant)
       if (event === 'tts_progress') updateTtsProgress(data, assistant)
@@ -467,6 +555,9 @@ function scrollActiveLine() { nextTick(() => document.querySelector('.bubble p.s
 function saveSettings(data) {
   Object.assign(chatSettings, data.chat)
   Object.assign(imageSettings, data.image)
+  Object.assign(appearanceSettings, data.appearance)
+  Object.assign(appearancePreview, appearanceSettings)
+  localStorage.setItem('ai-voice-chat-vue-appearance', JSON.stringify(appearanceSettings))
   forceWebConfig.value = data.force
   setStatus(data.force ? '已使用网页配置' : '优先使用 config.txt', data.force ? '下一次请求将强制使用本页设置。' : '将回退到 config.txt 的配置。')
 }
@@ -476,7 +567,7 @@ onBeforeUnmount(() => { if (saveTimer) window.clearTimeout(saveTimer); stopAll()
 </script>
 
 <template>
-  <main class="app-shell" :class="{ dark: darkMode }">
+  <main class="app-shell" :class="['background-' + appearancePreview.background, { dark: darkMode }]" :style="appearanceVars">
     <AppSidebar
       :conversations="conversations" :conversation-id="conversationId" :voices="voices" :voice="voice" :speaking-speed="speakingSpeed" :status="status"
       @new="newConversation" @open="openConversation" @delete="deleteConversation" @update:voice="voice = $event" @update:speaking-speed="speakingSpeed = $event"
@@ -486,7 +577,7 @@ onBeforeUnmount(() => { if (saveTimer) window.clearTimeout(saveTimer); stopAll()
       <header class="chat-header">
         <button class="icon-button mobile-only" type="button" @click="mobileMenuOpen = !mobileMenuOpen">☰</button>
         <div><span class="eyebrow">VOICE-ALIGNED CHAT</span><h1>{{ conversationTitle }}</h1></div>
-        <div class="header-actions"><button class="icon-button" :title="muted ? '取消静音' : '静音'" type="button" @click="toggleMute">{{ muted ? '🔇' : '🔊' }}</button><button class="theme-switch" :class="{ on: darkMode }" type="button" title="夜间模式" @click="darkMode = !darkMode"><span></span></button><button class="icon-button" title="模型设置" type="button" @click="settingsOpen = true">⚙</button></div>
+        <div class="header-actions"><ComputerControlMenu :mode="computerControl.mode" @update:mode="updateComputerControl" /><button class="icon-button" :title="muted ? '取消静音' : '静音'" type="button" @click="toggleMute">{{ muted ? '🔇' : '🔊' }}</button><button class="theme-switch" :class="{ on: darkMode }" type="button" title="夜间模式" @click="darkMode = !darkMode"><span></span></button><button class="icon-button" title="模型设置" type="button" @click="openSettings">⚙</button></div>
       </header>
       <div v-if="mobileMenuOpen" class="mobile-menu mobile-only">
         <button type="button" @click="newConversation">＋ 新建对话</button>
@@ -506,11 +597,11 @@ onBeforeUnmount(() => { if (saveTimer) window.clearTimeout(saveTimer); stopAll()
     </section>
 
     <Live2DPanel :speaking="ttsSpeaking" :emotion="activeEmotion" :live2d-control="activeLive2DControl" @model-change="activeLive2DModelId = $event" />
-    <SettingsDialog :open="settingsOpen" :chat="chatSettings" :image="imageSettings" :force-web-config="forceWebConfig" :dark="darkMode" @close="settingsOpen = false" @save="saveSettings" />
+    <SettingsDialog :open="settingsOpen" :chat="chatSettings" :image="imageSettings" :appearance="appearanceSettings" :force-web-config="forceWebConfig" :dark="darkMode" @close="closeSettings" @preview="previewAppearance" @save="saveSettings" />
   </main>
 </template>
 
 <style scoped>
-.chat-column { position:relative; display:grid; min-width:0; height:100%; min-height:0; grid-template-rows:auto minmax(0,1fr) auto; padding:28px clamp(18px,4vw,82px) 0; }.chat-header { display:flex; align-items:center; justify-content:space-between; gap:15px; padding:0 0 20px; border-bottom:1px solid var(--line); }.chat-header h1 { margin:8px 0 0; font-size:30px; letter-spacing:-.04em; }.eyebrow { display:block; color:var(--muted); font:600 11px/1 ui-monospace,monospace; letter-spacing:.09em; }.header-actions { display:flex; align-items:center; gap:8px; }.theme-switch { position:relative; width:48px; height:28px; border:1px solid var(--line); border-radius:100px; background:var(--surface-soft); }.theme-switch span { position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%; background:var(--muted); transition:.2s; }.theme-switch.on { border-color:var(--brand); background:var(--brand-soft); }.theme-switch.on span { transform:translateX(20px); background:var(--brand); }.chat-scroll { min-height:0; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable; padding:38px 0 18px; }.welcome { width:auto; max-width:760px; margin:52px auto; color:var(--muted); }.welcome > span { color:var(--brand); font-size:27px; }.welcome h2 { margin:13px 0 7px; color:var(--text); font-size:25px; }.welcome p { max-width:550px; margin:0; line-height:1.8; }.mobile-menu { position:absolute; top:76px; left:12px; z-index:25; display:grid; gap:8px; width:min(300px,calc(100vw - 24px)); max-height:75dvh; overflow:auto; padding:13px; border:1px solid var(--line); border-radius:12px; background:var(--surface); box-shadow:0 14px 35px rgba(0,0,0,.18); }.mobile-menu button,.mobile-menu select { width:100%; border:1px solid var(--line); border-radius:7px; padding:9px; color:var(--text); background:var(--surface); text-align:left; }.mobile-menu label { display:grid; gap:5px; color:var(--muted); font-size:12px; }.mobile-menu input { accent-color:var(--brand); }.mobile-menu strong { margin-top:5px; }
+.chat-column { position:relative; display:grid; min-width:0; height:100%; min-height:0; grid-template-rows:auto minmax(0,1fr) auto; padding:24px clamp(24px,4vw,72px) 0; }.chat-header { display:flex; align-items:center; justify-content:space-between; gap:15px; padding:0 4px 18px; border-bottom:1px solid var(--line); }.chat-header h1 { margin:8px 0 0; font-size:28px; letter-spacing:-.04em; }.eyebrow { display:block; color:var(--muted); font:600 11px/1 ui-monospace,monospace; letter-spacing:.09em; }.header-actions { display:flex; align-items:center; gap:8px; }.theme-switch { position:relative; width:48px; height:28px; border:1px solid var(--line); border-radius:100px; background:var(--surface-soft); }.theme-switch span { position:absolute; top:3px; left:3px; width:20px; height:20px; border-radius:50%; background:var(--muted); transition:.2s; }.theme-switch.on { border-color:var(--brand); background:var(--brand-soft); }.theme-switch.on span { transform:translateX(20px); background:var(--brand); }.chat-scroll { min-height:0; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; scrollbar-gutter:stable; padding:30px 4px 14px; }.chat-column :deep(.composer-wrap) { width:min(100%,900px); margin:0 auto; }.welcome { width:auto; max-width:760px; margin:clamp(38px,14vh,120px) auto; color:var(--muted); }.welcome > span { color:var(--brand); font-size:27px; }.welcome h2 { margin:13px 0 7px; color:var(--text); font-size:25px; }.welcome p { max-width:550px; margin:0; line-height:1.8; }.mobile-menu { position:absolute; top:76px; left:12px; z-index:25; display:grid; gap:8px; width:min(300px,calc(100vw - 24px)); max-height:75dvh; overflow:auto; padding:13px; border:1px solid var(--line); border-radius:12px; background:var(--surface); box-shadow:0 14px 35px rgba(0,0,0,.18); }.mobile-menu button,.mobile-menu select { width:100%; border:1px solid var(--line); border-radius:7px; padding:9px; color:var(--text); background:var(--surface); text-align:left; }.mobile-menu label { display:grid; gap:5px; color:var(--muted); font-size:12px; }.mobile-menu input { accent-color:var(--brand); }.mobile-menu strong { margin-top:5px; }
 @media(max-width:720px){.chat-column{height:100dvh;min-height:0;padding:16px 0 0;overflow:hidden}.chat-header,.chat-scroll,.composer-wrap{min-width:0;width:100%}.chat-header{padding:0 12px 13px}.chat-header>div:first-of-type{min-width:0;flex:1}.chat-header h1{overflow:hidden;font-size:21px;text-overflow:ellipsis;white-space:nowrap}.header-actions{flex:none;gap:5px}.header-actions .icon-button{width:33px;height:33px;border-radius:10px}.theme-switch{width:43px;height:27px}.theme-switch.on span{transform:translateX(16px)}.chat-scroll{padding:18px 12px 8px}.welcome{margin:30px 6px}.welcome h2{font-size:21px}.welcome p{font-size:14px}.mobile-only{display:inline-grid}.chat-header>.mobile-only{flex:none}}
 </style>

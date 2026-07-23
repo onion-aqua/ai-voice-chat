@@ -70,30 +70,30 @@ function askDelete(id) {
 </template>
 
 <style scoped>
-.sidebar { display:flex; flex-direction:column; gap:18px; height:100%; min-height:0; overflow:hidden; padding:28px 22px 20px; border-right:1px solid var(--line); background:var(--surface); }
-.brand { display:flex; align-items:center; gap:10px; font-family:Georgia,serif; font-size:25px; font-weight:700; white-space:nowrap; }
-.brand-mark { display:grid; place-items:center; width:38px; height:38px; border-radius:50%; background:var(--brand); color:white; font:700 20px/1 Inter,sans-serif; }
-.new-chat { min-height:54px; border:2px solid var(--text); border-radius:10px; color:var(--text); background:transparent; font-size:16px; }
+.sidebar { display:flex; flex-direction:column; gap:14px; height:100%; min-height:0; overflow:hidden; padding:22px 18px 14px; border-right:1px solid var(--line); background:color-mix(in srgb, var(--surface) 94%, var(--page)); }
+.brand { display:flex; align-items:center; gap:9px; padding:0 4px; font-family:Georgia,serif; font-size:23px; font-weight:700; letter-spacing:-.03em; white-space:nowrap; }
+.brand-mark { display:grid; place-items:center; width:36px; height:36px; border-radius:11px; background:var(--brand); color:white; font:700 18px/1 Inter,sans-serif; box-shadow:0 5px 13px color-mix(in srgb, var(--brand) 24%, transparent); }
+.new-chat { min-height:48px; border:1px solid var(--text); border-radius:11px; color:var(--text); background:var(--surface); font-size:14px; font-weight:650; box-shadow:0 4px 13px rgba(21,48,38,.04); }
 .new-chat:hover { color:var(--brand); border-color:var(--brand); }
-.voice-card { padding:14px 0 2px; color:var(--muted); }
+.voice-card { padding:13px; border:1px solid var(--line); border-radius:12px; color:var(--muted); background:var(--surface-soft); }
 .voice-card label { display:block; margin-bottom:8px; font-size:13px; }
 .voice-card select { width:100%; padding:11px 12px; border:1px solid var(--line); border-radius:8px; color:var(--text); background:var(--surface); }
-.speed-row { display:flex; justify-content:space-between; margin-top:20px; font-size:13px; }
+.speed-row { display:flex; justify-content:space-between; margin-top:16px; font-size:13px; }
 .speed-row strong { color:var(--brand); }
 .voice-card input { width:100%; margin:12px 0 8px; accent-color:var(--brand); }
 .voice-card p { margin:0; font-size:12px; line-height:1.65; }
-.history-section { min-height:0; flex:1; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; scrollbar-color:var(--line) transparent; scrollbar-gutter:stable; }
+.history-section { min-height:0; flex:1; overflow-x:hidden; overflow-y:auto; overscroll-behavior:contain; padding:7px 4px 0; border-top:1px solid var(--line); scrollbar-color:var(--line) transparent; scrollbar-gutter:stable; }
 .eyebrow { color:var(--muted); font:600 11px/1.2 ui-monospace,monospace; letter-spacing:.08em; }
 h2 { margin:8px 0 12px; font-size:17px; }
-.history-list { display:grid; gap:4px; }
+.history-list { display:grid; gap:3px; padding-bottom:5px; }
 .history-row { display:flex; align-items:center; min-width:0; gap:3px; }
-.history-item { min-width:0; flex:1; overflow:hidden; border:0; border-radius:7px; padding:9px 7px; color:var(--text); background:transparent; text-align:left; text-overflow:ellipsis; white-space:nowrap; }
+.history-item { min-width:0; flex:1; overflow:hidden; border:0; border-radius:8px; padding:9px 8px; color:var(--text); background:transparent; text-align:left; text-overflow:ellipsis; white-space:nowrap; }
 .history-item:hover,.history-item.active { background:var(--surface-soft); color:var(--brand); }
 .history-delete { display:none; flex:none; border:0; border-radius:6px; padding:5px 6px; color:var(--danger); background:transparent; font-size:11px; }
 .history-row:hover .history-delete,.history-delete.confirm { display:block; }
 .history-delete.confirm { background:color-mix(in srgb, var(--danger) 14%, transparent); }
 .empty-history { padding:8px 0; color:var(--muted); font-size:13px; }
-.status-card { display:flex; gap:11px; align-items:flex-start; padding:13px; border-radius:10px; background:var(--surface-soft); }
+.status-card { display:flex; gap:11px; align-items:flex-start; padding:12px; border:1px solid var(--line); border-radius:11px; background:var(--surface-soft); }
 .status-dot { width:9px; height:9px; margin-top:4px; border-radius:50%; background:var(--brand); }
 .status-card.error .status-dot { background:var(--danger); }.status-card.working .status-dot { animation:pulse 1s infinite; }
 .status-card strong,.status-card small { display:block; }.status-card strong { font-size:13px; }.status-card small { margin-top:3px; color:var(--muted); font-size:11px; line-height:1.45; }

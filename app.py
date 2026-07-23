@@ -12,13 +12,15 @@ import os
 import queue
 import re
 import socket
+import subprocess
 import sys
 import threading
 import time
 import uuid
+import webbrowser
 from html import unescape
 from pathlib import Path
-from typing import Iterator
+from typing import Iterator, Literal
 from urllib.parse import parse_qs, quote, quote_plus, unquote, urlencode, urljoin, urlparse
 
 import httpx
@@ -36,6 +38,8 @@ MEDIA_DIR = APP_DIR / "runtime" / "audio"
 MEDIA_DIR.mkdir(parents=True, exist_ok=True)
 GENERATED_IMAGE_DIR = MEDIA_DIR.parent / "images"
 GENERATED_IMAGE_DIR.mkdir(parents=True, exist_ok=True)
+COMPUTER_SCREENSHOT_DIR = MEDIA_DIR.parent / "computer-screenshots"
+COMPUTER_SCREENSHOT_DIR.mkdir(parents=True, exist_ok=True)
 LIVE2D_MODELS_DIR = APP_DIR / "live2dmodels"
 CONVERSATIONS_PATH = MEDIA_DIR.parent / "conversations.json"
 CONVERSATIONS_LOCK = threading.Lock()
@@ -163,11 +167,20 @@ TOOL_SYSTEM_PROMPT = """
 工具调用完成后,用工具结果回答用户;最终可见回复仍必须严格遵守每行 `文字&&[8个情感值]` 的格式.不要向用户输出工具调用 JSON.
 绝不把 JSON、函数参数、tool_calls、function_call、事件名、URL 参数或工具原始返回直接写入可见回复；这些都属于内部信息。只提炼用户需要的结论、来源和清晰的自然语言说明。
 """.strip()
-MAX_AGENT_TOOL_ROUNDS = 10
-MAX_AGENT_IMAGE_CALLS = 10
-MAX_AGENT_SEARCH_CALLS = 10
-MAX_AGENT_BROWSE_CALLS = 10
-MAX_AGENT_LOCATION_CALLS = 10
+# Set to 0 for no limit. The user can stop a long-running agent from the UI.
+MAX_AGENT_TOOL_ROUNDS = 0
+MAX_AGENT_IMAGE_CALLS = 0
+MAX_AGENT_SEARCH_CALLS = 0
+MAX_AGENT_BROWSE_CALLS = 0
+MAX_AGENT_LOCATION_CALLS = 0
+MAX_AGENT_COMPUTER_CALLS = 0
+MAX_COMPUTER_FILE_CHARS = 24_000
+MAX_COMPUTER_FILE_WRITE_CHARS = 100_000
+MAX_COMMAND_OUTPUT_CHARS = 16_000
+COMPUTER_TOOL_NAMES = {
+    "run_cmd", "list_files", "read_text_file", "write_text_file", "take_screenshot",
+    "desktop_click", "desktop_type", "open_browser",
+}
 AUTOMATION_TOOLS = [
     {
         "type": "function",
@@ -220,6 +233,128 @@ AUTOMATION_TOOLS = [
                 "type": "object",
                 "properties": {"prompt": {"type": "string", "description": "适合图片生成 API 的详细画面提示词"}},
                 "required": ["prompt"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
+
+COMPUTER_TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_cmd",
+            "description": "在 Windows CMD 中执行一条命令。处理本地文件、项目和环境时应优先使用；仅在用户明确要求本机操作时调用。不得执行删除、关机、磁盘/注册表/账户修改等危险命令。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "command": {"type": "string", "description": "要执行的一条 CMD 命令；不要包含删除、关机、账户或磁盘管理命令"},
+                    "working_directory": {"type": "string", "description": "命令工作目录；省略时使用本应用目录"},
+                    "timeout_seconds": {"type": "integer", "description": "命令超时秒数，1 到 120，默认 30"},
+                },
+                "required": ["command"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "list_files",
+            "description": "列出本机目录中的文件和子目录。仅在用户明确要求查看或操作本地文件时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "目标目录；相对路径以本应用目录为准"},
+                    "max_depth": {"type": "integer", "description": "递归深度，0 到 3，默认 1"},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "read_text_file",
+            "description": "读取一个本地文本文件的内容。仅在用户明确要求读取该文件或完成该文件任务时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "文本文件路径"},
+                    "max_chars": {"type": "integer", "description": "最多读取字符数，默认 12000，最大 24000"},
+                },
+                "required": ["path"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "write_text_file",
+            "description": "创建或修改一个本地 UTF-8 文本文件。只有用户明确给出目标和修改意图时才能调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "path": {"type": "string", "description": "要创建或修改的文件路径"},
+                    "content": {"type": "string", "description": "写入文件的完整文本内容"},
+                    "overwrite": {"type": "boolean", "description": "文件已存在时是否覆盖；默认 false"},
+                    "create_parents": {"type": "boolean", "description": "父目录不存在时是否创建；默认 false"},
+                },
+                "required": ["path", "content"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "take_screenshot",
+            "description": "截取当前 Windows 屏幕，让模型据此规划下一步桌面操作。仅当 CMD 无法完成任务、需要验证可视界面，或用户明确要求观察屏幕时调用；截图可能包含敏感信息。",
+            "parameters": {"type": "object", "properties": {}, "additionalProperties": False},
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_click",
+            "description": "在 Windows 桌面指定坐标单击。仅在 CMD 无法完成且需要图形界面操作时调用；必须先有最新截图或用户给出的明确坐标，且仅用于用户明确授权的操作。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "x": {"type": "integer", "description": "屏幕 X 坐标"},
+                    "y": {"type": "integer", "description": "屏幕 Y 坐标"},
+                    "button": {"type": "string", "enum": ["left", "right"], "description": "鼠标按键，默认 left"},
+                    "clicks": {"type": "integer", "description": "点击次数，仅 1 或 2，默认 1"},
+                },
+                "required": ["x", "y"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "desktop_type",
+            "description": "向当前获得焦点的 Windows 窗口输入文本。仅在 CMD 无法完成且需要图形界面操作时调用；只能在用户明确要求输入该文本、且已通过截图确认焦点位置后调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {"text": {"type": "string", "description": "要输入的文本，最多 1000 个字符"}},
+                "required": ["text"],
+                "additionalProperties": False,
+            },
+        },
+    },
+    {
+        "type": "function",
+        "function": {
+            "name": "open_browser",
+            "description": "用默认浏览器打开一个公开 http 或 https 链接。应先用 web_search 确定链接；仅在用户明确要求打开网页或继续浏览器操作时调用。",
+            "parameters": {
+                "type": "object",
+                "properties": {"url": {"type": "string", "description": "要在默认浏览器打开的公开 http 或 https 链接"}},
+                "required": ["url"],
                 "additionalProperties": False,
             },
         },
@@ -339,6 +474,11 @@ class LocationContext(BaseModel):
     accuracy: float = Field(default=0, ge=0, le=100_000)
 
 
+class ComputerControlSettings(BaseModel):
+    """User-selected policy for local computer and internet automation."""
+    mode: Literal["ask", "review", "full"] = "review"
+
+
 class AttachmentReference(BaseModel):
     id: str = Field(min_length=32, max_length=64)
 
@@ -353,6 +493,7 @@ class ChatRequest(BaseModel):
     speaking_speed: float = Field(default=1.0, ge=0.75, le=1.35)
     agent_enabled: bool = True
     live2d_model_id: str = Field(default="", max_length=1000)
+    computer_control: ComputerControlSettings = Field(default_factory=ComputerControlSettings)
     web_chat: WebChatSettings = Field(default_factory=WebChatSettings)
     web_image: WebImageSettings = Field(default_factory=WebImageSettings)
 
@@ -1024,6 +1165,7 @@ def serve_local_live2d_asset(asset_path: str):
 app.mount("/static", StaticFiles(directory=STATIC_DIR), name="static")
 app.mount("/media", StaticFiles(directory=MEDIA_DIR), name="media")
 app.mount("/generated-images", StaticFiles(directory=GENERATED_IMAGE_DIR), name="generated-images")
+app.mount("/computer-screenshots", StaticFiles(directory=COMPUTER_SCREENSHOT_DIR), name="computer-screenshots")
 
 
 @app.middleware("http")
@@ -1476,9 +1618,26 @@ def compact_history_context(history: list[dict[str, str]], char_budget: int) -> 
     return "\n".join(summary_lines), recent
 
 
+def computer_control_instruction(control: ComputerControlSettings) -> str:
+    mode_copy = {
+        "ask": "请求批准：联网、读取外部文件、截图、写文件、打开浏览器和桌面输入都会先返回待批准状态。",
+        "review": "替我审批：公开网页搜索、目录查看和非敏感文本读取可执行；截图、外部敏感文件、写文件、打开浏览器及桌面点击/输入会先返回待批准状态。",
+        "full": "完全访问权限：用户明确允许本轮执行联网、本地文件、截图、浏览器和桌面操作；仍只执行用户明确目标，不得猜测、删除文件、批量修改或进行支付、登录、发送、发布等高影响操作。",
+    }
+    return (
+        "电脑控制权限：" + mode_copy[control.mode] + "\n"
+        "只有用户明确要求处理本机文件、浏览器或桌面时才调用相关工具。本机文件、项目、环境与命令任务必须优先使用 run_cmd，并先根据命令输出判断结果；"
+        "只有 CMD 不适用时才使用专用文件工具。截图是最后的兜底手段：仅当 CMD 已无法完成、必须验证可视界面，或用户明确要求图形界面时，才截图、点击或输入；"
+        "绝不为了查看文件、目录、命令结果或普通网页内容而截图。桌面点击前必须先得到最新截图或用户明确坐标；"
+        "输入前必须确认焦点和输入内容。工具若返回待批准状态，应简要说明需要用户在顶部“电脑控制”按钮中切换权限后重试。"
+    )
+
+
 def chat_messages(request: ChatRequest, attachments: list[dict] | None = None, search_results: list[dict[str, str]] | None = None) -> list[BaseMessage]:
     """将网页历史转换成 LangChain 的标准消息对象."""
     system_content = f"{SYSTEM_PROMPT}\n\n{TOOL_SYSTEM_PROMPT}" if request.agent_enabled else SYSTEM_PROMPT
+    if request.agent_enabled:
+        system_content = f"{system_content}\n\n{computer_control_instruction(request.computer_control)}"
     if live2d_prompt := live2d_control_system_prompt(request.live2d_model_id):
         system_content = f"{system_content}\n\n{live2d_prompt}"
     chat_config = resolve_chat_config(request)
@@ -1731,15 +1890,368 @@ def model_tool_calls(message: object) -> list[dict]:
     return [call for _, call in sorted(grouped.items()) if call.get("name")]
 
 
+INTERNET_TOOL_NAMES = {"web_search", "browse_webpage", "get_local_environment", "generate_image"}
+COMPUTER_ACTION_LABELS = {
+    "web_search": "联网搜索", "browse_webpage": "读取网页", "get_local_environment": "联网查询位置环境",
+    "generate_image": "调用在线图片服务", "run_cmd": "执行 CMD 命令", "list_files": "查看外部目录", "read_text_file": "读取外部文件",
+    "write_text_file": "创建或修改文件", "take_screenshot": "截取当前屏幕", "desktop_click": "点击桌面",
+    "desktop_type": "向当前窗口输入文本", "open_browser": "打开浏览器网页",
+}
+SENSITIVE_PATH_MARKERS = (".env", "credential", "secret", "token", "password", "passwd", "id_rsa", "apikey", "api_key")
+DANGEROUS_CMD_PATTERN = re.compile(
+    r"(?:^|[&|]\s*)(?:del|erase|rd|rmdir|format|diskpart|shutdown|restart|bcdedit|vssadmin|"
+    r"wevtutil\s+cl|cipher\s+/w|taskkill|sc\s+delete|net\s+(?:user|localgroup)|reg\s+delete)\b|"
+    r"\b(?:remove-item|clear-disk|stop-computer|restart-computer)\b|\bpowershell(?:\.exe)?\b[^\r\n]*\s-(?:enc|encodedcommand)\b",
+    flags=re.IGNORECASE,
+)
+
+
+def resolved_computer_path(raw_path: object) -> Path:
+    value = str(raw_path or "").strip()
+    if not value:
+        raise RuntimeError("电脑工具没有收到有效的文件路径。")
+    candidate = Path(value).expanduser()
+    if not candidate.is_absolute():
+        candidate = APP_DIR / candidate
+    return candidate.resolve(strict=False)
+
+
+def computer_path_is_internal(path: Path) -> bool:
+    try:
+        path.relative_to(APP_DIR)
+        return True
+    except ValueError:
+        return False
+
+
+def computer_path_looks_sensitive(path: Path) -> bool:
+    name = path.name.casefold()
+    return any(marker in name for marker in SENSITIVE_PATH_MARKERS)
+
+
+def computer_approval_payload(tool_name: str, control: ComputerControlSettings) -> dict[str, str]:
+    mode_label = {"ask": "请求批准", "review": "替我审批", "full": "完全访问权限"}[control.mode]
+    action = COMPUTER_ACTION_LABELS.get(tool_name, "此操作")
+    return {
+        "status": "approval_required",
+        "mode": control.mode,
+        "action": action,
+        "message": f"当前为「{mode_label}」，{action}需要批准。请在顶部“电脑控制”按钮中切换权限后重新发送这项请求。",
+    }
+
+
+def computer_tool_needs_approval(tool_name: str, arguments: dict, control: ComputerControlSettings) -> bool:
+    """Keep read-only, low-risk operations usable in review mode and gate side effects."""
+    if control.mode == "full":
+        return False
+    if tool_name in INTERNET_TOOL_NAMES:
+        return control.mode == "ask"
+    if tool_name == "list_files":
+        try:
+            return control.mode == "ask" and not computer_path_is_internal(resolved_computer_path(arguments.get("path")))
+        except RuntimeError:
+            return False
+    if tool_name == "read_text_file":
+        try:
+            path = resolved_computer_path(arguments.get("path"))
+        except RuntimeError:
+            return False
+        if computer_path_looks_sensitive(path):
+            return True
+        return control.mode == "ask" and not computer_path_is_internal(path)
+    # Screenshots can disclose any active application. File writes and desktop
+    # input have side effects, so both modes intentionally stop for approval.
+    return tool_name in COMPUTER_TOOL_NAMES
+
+
+def run_cmd(arguments: dict) -> dict:
+    """Run a bounded, auditable CMD command without opening an extra console window."""
+    command = str(arguments.get("command", "")).strip()
+    if not command:
+        raise RuntimeError("CMD 工具没有收到有效命令。")
+    if len(command) > 4_000:
+        raise RuntimeError("单条 CMD 命令最多 4000 个字符。")
+    if DANGEROUS_CMD_PATTERN.search(command):
+        raise RuntimeError("为保护电脑，CMD 工具不执行删除、关机、磁盘、注册表或账户管理类命令。")
+    working_directory_value = str(arguments.get("working_directory", "")).strip()
+    working_directory = resolved_computer_path(working_directory_value) if working_directory_value else APP_DIR
+    if not working_directory.exists() or not working_directory.is_dir():
+        raise RuntimeError("CMD 工作目录不存在或不是目录。")
+    try:
+        timeout_seconds = max(1, min(int(arguments.get("timeout_seconds", 30)), 120))
+    except (TypeError, ValueError):
+        timeout_seconds = 30
+    try:
+        completed = subprocess.run(
+            ["cmd.exe", "/d", "/s", "/c", command],
+            cwd=str(working_directory),
+            capture_output=True,
+            text=True,
+            encoding="mbcs",
+            errors="replace",
+            timeout=timeout_seconds,
+            creationflags=getattr(subprocess, "CREATE_NO_WINDOW", 0),
+            check=False,
+        )
+    except subprocess.TimeoutExpired as error:
+        raise RuntimeError(f"CMD 命令超过 {timeout_seconds} 秒仍未完成，已停止。") from error
+    except OSError as error:
+        raise RuntimeError(f"CMD 命令启动失败：{error}") from error
+    stdout = completed.stdout or ""
+    stderr = completed.stderr or ""
+    total = stdout + stderr
+    return {
+        "command": command,
+        "working_directory": str(working_directory),
+        "exit_code": completed.returncode,
+        "stdout": stdout[:MAX_COMMAND_OUTPUT_CHARS],
+        "stderr": stderr[:MAX_COMMAND_OUTPUT_CHARS],
+        "truncated": len(total) > MAX_COMMAND_OUTPUT_CHARS * 2,
+    }
+
+
+def list_local_files(arguments: dict) -> dict:
+    directory = resolved_computer_path(arguments.get("path"))
+    if not directory.exists():
+        raise RuntimeError(f"目录不存在：{directory}")
+    if not directory.is_dir():
+        raise RuntimeError("目标不是目录，请改用读取文本文件工具。")
+    try:
+        max_depth = max(0, min(int(arguments.get("max_depth", 1)), 3))
+    except (TypeError, ValueError):
+        max_depth = 1
+    entries: list[dict[str, object]] = []
+    for root, directories, files in os.walk(directory, topdown=True, followlinks=False):
+        root_path = Path(root)
+        depth = len(root_path.relative_to(directory).parts)
+        directories[:] = sorted(item for item in directories if not item.startswith("."))
+        files = sorted(item for item in files if not item.startswith("."))
+        if depth >= max_depth:
+            directories[:] = []
+        for name in [*directories, *files]:
+            path = root_path / name
+            try:
+                is_dir = path.is_dir()
+                entries.append({
+                    "path": str(path), "type": "directory" if is_dir else "file",
+                    "size": None if is_dir else path.stat().st_size,
+                })
+            except OSError:
+                entries.append({"path": str(path), "type": "unavailable", "size": None})
+            if len(entries) >= 200:
+                return {"path": str(directory), "entries": entries, "truncated": True}
+    return {"path": str(directory), "entries": entries, "truncated": False}
+
+
+def read_local_text_file(arguments: dict) -> dict:
+    path = resolved_computer_path(arguments.get("path"))
+    if not path.is_file():
+        raise RuntimeError("目标不是可读取的文件。")
+    try:
+        max_chars = max(1, min(int(arguments.get("max_chars", 12_000)), MAX_COMPUTER_FILE_CHARS))
+    except (TypeError, ValueError):
+        max_chars = 12_000
+    try:
+        raw = path.read_bytes()
+    except OSError as error:
+        raise RuntimeError(f"文件读取失败：{error}") from error
+    if b"\x00" in raw[:4096]:
+        raise RuntimeError("该文件看起来是二进制文件，不能按文本读取。")
+    text = ""
+    for encoding in ("utf-8", "utf-8-sig", "gb18030"):
+        try:
+            text = raw.decode(encoding)
+            break
+        except UnicodeDecodeError:
+            continue
+    if not text:
+        text = raw.decode("utf-8", errors="replace")
+    return {"path": str(path), "content": text[:max_chars], "truncated": len(text) > max_chars}
+
+
+def write_local_text_file(arguments: dict) -> dict:
+    path = resolved_computer_path(arguments.get("path"))
+    content = str(arguments.get("content", ""))
+    if len(content) > MAX_COMPUTER_FILE_WRITE_CHARS:
+        raise RuntimeError(f"一次最多写入 {MAX_COMPUTER_FILE_WRITE_CHARS} 个字符。")
+    already_existed = path.exists()
+    if already_existed and path.is_dir():
+        raise RuntimeError("目标是目录，不能写入文本。")
+    if already_existed and not bool(arguments.get("overwrite", False)):
+        raise RuntimeError("目标文件已存在；需要覆盖时请明确将 overwrite 设为 true。")
+    if not path.parent.exists():
+        if not bool(arguments.get("create_parents", False)):
+            raise RuntimeError("父目录不存在；需要创建时请明确将 create_parents 设为 true。")
+        path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        path.write_text(content, encoding="utf-8")
+    except OSError as error:
+        raise RuntimeError(f"文件写入失败：{error}") from error
+    return {"path": str(path), "bytes_written": len(content.encode("utf-8")), "overwritten": already_existed}
+
+
+def virtual_screen_bounds() -> tuple[int, int, int, int]:
+    if os.name != "nt":
+        raise RuntimeError("桌面控制目前仅支持 Windows。")
+    import ctypes
+    user32 = ctypes.windll.user32
+    left = int(user32.GetSystemMetrics(76))
+    top = int(user32.GetSystemMetrics(77))
+    width = int(user32.GetSystemMetrics(78))
+    height = int(user32.GetSystemMetrics(79))
+    if width <= 0 or height <= 0:
+        raise RuntimeError("无法读取当前屏幕尺寸。")
+    return left, top, width, height
+
+
+def take_local_screenshot() -> dict:
+    if os.name != "nt":
+        raise RuntimeError("屏幕截图目前仅支持 Windows。")
+    try:
+        from PIL import ImageGrab
+        screenshot = ImageGrab.grab(all_screens=True)
+    except Exception as error:
+        raise RuntimeError(f"屏幕截图失败：{error}") from error
+    origin_x, origin_y, screen_width, screen_height = virtual_screen_bounds()
+    original_size = screenshot.size
+    screenshot.thumbnail((1600, 1000))
+    encoded = io.BytesIO()
+    screenshot.convert("RGB").save(encoded, format="JPEG", quality=82, optimize=True)
+    image_bytes = encoded.getvalue()
+    filename = f"{int(time.time() * 1000)}-{uuid.uuid4().hex}.jpg"
+    (COMPUTER_SCREENSHOT_DIR / filename).write_bytes(image_bytes)
+    return {
+        "url": f"/computer-screenshots/{filename}",
+        "width": original_size[0], "height": original_size[1],
+        "preview_width": screenshot.size[0], "preview_height": screenshot.size[1],
+        "virtual_screen_origin": {"x": origin_x, "y": origin_y},
+        "virtual_screen_size": {"width": screen_width, "height": screen_height},
+        "_model_image": f"data:image/jpeg;base64,{base64.b64encode(image_bytes).decode('ascii')}",
+    }
+
+
+def click_desktop(arguments: dict) -> dict:
+    if os.name != "nt":
+        raise RuntimeError("桌面控制目前仅支持 Windows。")
+    try:
+        x, y = int(arguments.get("x")), int(arguments.get("y"))
+        clicks = int(arguments.get("clicks", 1))
+    except (TypeError, ValueError) as error:
+        raise RuntimeError("点击坐标必须是整数。") from error
+    if clicks not in {1, 2}:
+        raise RuntimeError("点击次数只能是 1 或 2。")
+    left, top, width, height = virtual_screen_bounds()
+    if not left <= x < left + width or not top <= y < top + height:
+        raise RuntimeError("点击坐标不在当前虚拟屏幕范围内。")
+    button = str(arguments.get("button", "left")).lower()
+    if button not in {"left", "right"}:
+        raise RuntimeError("鼠标按键只能是 left 或 right。")
+    import ctypes
+    user32 = ctypes.windll.user32
+    if not user32.SetCursorPos(x, y):
+        raise RuntimeError("无法移动鼠标到指定坐标。")
+    down, up = (0x0002, 0x0004) if button == "left" else (0x0008, 0x0010)
+    for index in range(clicks):
+        user32.mouse_event(down, 0, 0, 0, 0)
+        user32.mouse_event(up, 0, 0, 0, 0)
+        if index + 1 < clicks:
+            time.sleep(0.12)
+    return {"x": x, "y": y, "button": button, "clicks": clicks}
+
+
+def type_on_desktop(arguments: dict) -> dict:
+    if os.name != "nt":
+        raise RuntimeError("桌面控制目前仅支持 Windows。")
+    text = str(arguments.get("text", ""))
+    if not text:
+        raise RuntimeError("没有需要输入的文本。")
+    if len(text) > 1000:
+        raise RuntimeError("一次最多输入 1000 个字符。")
+    import ctypes
+    from ctypes import wintypes
+
+    ulong_ptr = ctypes.c_ulonglong if ctypes.sizeof(ctypes.c_void_p) == 8 else ctypes.c_ulong
+
+    class KeyBdInput(ctypes.Structure):
+        _fields_ = [("wVk", wintypes.WORD), ("wScan", wintypes.WORD), ("dwFlags", wintypes.DWORD), ("time", wintypes.DWORD), ("dwExtraInfo", ulong_ptr)]
+
+    class InputUnion(ctypes.Union):
+        _fields_ = [("ki", KeyBdInput)]
+
+    class Input(ctypes.Structure):
+        _anonymous_ = ("union",)
+        _fields_ = [("type", wintypes.DWORD), ("union", InputUnion)]
+
+    user32 = ctypes.windll.user32
+    user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(Input), ctypes.c_int)
+    user32.SendInput.restype = wintypes.UINT
+    sent = 0
+    for character in text:
+        if character == "\n":
+            user32.keybd_event(0x0D, 0, 0, 0)
+            user32.keybd_event(0x0D, 0, 0x0002, 0)
+            sent += 1
+            continue
+        scan_code = ord(character)
+        inputs = (Input * 2)(
+            Input(type=1, ki=KeyBdInput(0, scan_code, 0x0004, 0, 0)),
+            Input(type=1, ki=KeyBdInput(0, scan_code, 0x0004 | 0x0002, 0, 0)),
+        )
+        if user32.SendInput(2, inputs, ctypes.sizeof(Input)) != 2:
+            raise RuntimeError("Windows 拒绝了键盘输入；请确认目标窗口仍在前台。")
+        sent += 1
+    return {"characters_typed": sent}
+
+
+def open_in_default_browser(arguments: dict) -> dict:
+    url = validate_public_web_url(str(arguments.get("url", "")).strip()[:2000])
+    if not webbrowser.open(url, new=2):
+        raise RuntimeError("默认浏览器没有接受打开请求。")
+    return {"url": url}
+
+
+def execute_computer_tool(name: str, arguments: dict) -> tuple[str, dict, str]:
+    if name == "run_cmd":
+        payload = run_cmd(arguments)
+    elif name == "list_files":
+        payload = list_local_files(arguments)
+    elif name == "read_text_file":
+        payload = read_local_text_file(arguments)
+    elif name == "write_text_file":
+        payload = write_local_text_file(arguments)
+    elif name == "take_screenshot":
+        payload = take_local_screenshot()
+        return "computer_screenshot", payload, json.dumps({key: value for key, value in payload.items() if key != "_model_image"}, ensure_ascii=False)
+    elif name == "desktop_click":
+        payload = click_desktop(arguments)
+    elif name == "desktop_type":
+        payload = type_on_desktop(arguments)
+    elif name == "open_browser":
+        payload = open_in_default_browser(arguments)
+    else:
+        raise RuntimeError(f"不支持的电脑工具：{name or 'unknown'}")
+    return "computer_result", payload, json.dumps(payload, ensure_ascii=False)
+
+
 def execute_automation_tool(
     tool_call: dict,
     image_config_factory=None,
     reference_images: list[dict] | None = None,
     location: LocationContext | None = None,
+    computer_control: ComputerControlSettings | None = None,
 ) -> tuple[str, dict, str]:
     """Execute one model-selected tool and return its UI event plus ToolMessage content."""
     name = str(tool_call.get("name", ""))
     arguments = tool_call_arguments(tool_call)
+    control = computer_control or ComputerControlSettings()
+    if name in INTERNET_TOOL_NAMES or name in COMPUTER_TOOL_NAMES:
+        if computer_tool_needs_approval(name, arguments, control):
+            payload = computer_approval_payload(name, control)
+            return "computer_approval", payload, json.dumps(payload, ensure_ascii=False)
+    if name in COMPUTER_TOOL_NAMES:
+        result = execute_computer_tool(name, arguments)
+        print(f"[Tool][Computer] name={name}", flush=True)
+        return result
     if name == "web_search":
         query = str(arguments.get("query", "")).strip()[:1000]
         if not query:
@@ -1784,6 +2296,7 @@ def stream_model(
     image_config_factory=None,
     reference_images: list[dict] | None = None,
     location: LocationContext | None = None,
+    computer_control: ComputerControlSettings | None = None,
 ) -> Iterator[tuple[str, str, object]]:
     """Stream answers while allowing the model to call search and image tools first."""
     provider = chat_config["provider"]
@@ -1838,11 +2351,11 @@ def stream_model(
         full_thinking: list[str] = []
         full_raw_text: list[str] = []
         working_messages = list(messages)
-        tool_model = chat_model.bind_tools(AUTOMATION_TOOLS) if agent_enabled else chat_model
-        max_rounds = MAX_AGENT_TOOL_ROUNDS if agent_enabled else 1
+        tool_model = chat_model.bind_tools([*AUTOMATION_TOOLS, *COMPUTER_TOOLS]) if agent_enabled else chat_model
         tool_counts: dict[str, int] = {}
+        tool_round = 0
 
-        for tool_round in range(max_rounds):
+        while True:
             final_chunk = None
 
             def raw_chunks() -> Iterator[str]:
@@ -1883,8 +2396,9 @@ def stream_model(
             tool_calls = model_tool_calls(final_chunk)
             if not agent_enabled or not tool_calls:
                 break
-            if tool_round == max_rounds - 1:
+            if MAX_AGENT_TOOL_ROUNDS > 0 and tool_round >= MAX_AGENT_TOOL_ROUNDS:
                 raise RuntimeError("模型连续请求工具超过上限,已停止本轮调用.")
+            tool_round += 1
 
             normalized_calls: list[dict] = []
             for raw_call in tool_calls:
@@ -1908,10 +2422,14 @@ def stream_model(
                     "web_search": MAX_AGENT_SEARCH_CALLS,
                     "browse_webpage": MAX_AGENT_BROWSE_CALLS,
                     "get_local_environment": MAX_AGENT_LOCATION_CALLS,
+                    **{name: MAX_AGENT_COMPUTER_CALLS for name in COMPUTER_TOOL_NAMES},
                 }.get(tool_name, 0)
                 detail = str(
                     arguments.get("query") if tool_name in {"web_search", "get_local_environment"}
                     else arguments.get("url") if tool_name == "browse_webpage"
+                    else arguments.get("command") if tool_name == "run_cmd"
+                    else arguments.get("path") if tool_name in {"list_files", "read_text_file", "write_text_file"}
+                    else arguments.get("text") if tool_name == "desktop_type"
                     else arguments.get("prompt", "")
                 ).strip()[:120]
                 step_payload = {"call_id": tool_call["id"], "tool": tool_name, "detail": detail}
@@ -1925,14 +2443,28 @@ def stream_model(
                     "web_search": "模型正在联网搜索…",
                     "browse_webpage": "模型正在阅读网页正文…",
                     "get_local_environment": "模型正在查询本地天气和设施…",
-                }.get(tool_name, "模型正在生成图片…")
+                    "generate_image": "模型正在生成图片…",
+                    "run_cmd": "模型正在执行 CMD 命令…",
+                    "list_files": "模型正在查看本地目录…",
+                    "read_text_file": "模型正在读取本地文件…",
+                    "write_text_file": "模型正在写入本地文件…",
+                    "take_screenshot": "模型正在获取当前屏幕…",
+                    "desktop_click": "模型正在执行桌面点击…",
+                    "desktop_type": "模型正在向当前窗口输入…",
+                    "open_browser": "模型正在打开默认浏览器…",
+                }.get(tool_name, "模型正在调用工具…")
                 yield "tool_status", status, None
                 try:
                     event_name, event_payload, tool_result = execute_automation_tool(
-                        tool_call, image_config_factory, reference_images, location,
+                        tool_call, image_config_factory, reference_images, location, computer_control,
                     )
+                    model_image = event_payload.pop("_model_image", None) if isinstance(event_payload, dict) else None
                     yield event_name, json.dumps(event_payload, ensure_ascii=False), None
-                    yield "agent_step", json.dumps({**step_payload, "state": "completed"}, ensure_ascii=False), None
+                    state = "approval_required" if event_name == "computer_approval" else "completed"
+                    step = {**step_payload, "state": state}
+                    if event_name == "computer_approval" and isinstance(event_payload, dict):
+                        step["message"] = event_payload.get("message", "需要用户批准。")
+                    yield "agent_step", json.dumps(step, ensure_ascii=False), None
                 except Exception as error:
                     message = str(error)
                     tool_result = json.dumps({"error": message}, ensure_ascii=False)
@@ -1945,7 +2477,15 @@ def stream_model(
                         yield "local_environment", json.dumps({"error": message}, ensure_ascii=False), None
                     elif tool_name == "generate_image":
                         yield "image", json.dumps({"error": message}, ensure_ascii=False), None
+                    elif tool_name in COMPUTER_TOOL_NAMES:
+                        yield "computer_result", json.dumps({"error": message}, ensure_ascii=False), None
+                    model_image = None
                 working_messages.append(ToolMessage(content=tool_result, tool_call_id=tool_call["id"]))
+                if isinstance(model_image, str) and model_image:
+                    working_messages.append(HumanMessage(content=[
+                        {"type": "text", "text": "电脑截图工具已返回。请仅依据这张最新截图继续规划下一步；若操作会改变文件、网页或桌面状态，必须遵守当前电脑控制权限。"},
+                        {"type": "image_url", "image_url": {"url": model_image}},
+                    ]))
         print("[LLM] stream completed", flush=True)
         if full_thinking:
             print(f"[LLM][thinking]\n{''.join(full_thinking)}", flush=True)
@@ -2211,6 +2751,7 @@ def chat(request: ChatRequest):
                 ]
                 for event_type, delta, metadata in stream_model(
                     messages, chat_config, request.agent_enabled, image_config_factory, reference_images, request.location,
+                    request.computer_control,
                 ):
                     if cancel_event.is_set():
                         return
@@ -2372,12 +2913,12 @@ def chat(request: ChatRequest):
                 if event_type == "tool_status":
                     yield sse("status", {"message": delta})
                     continue
-                if event_type in {"search_results", "image", "agent_step", "webpage", "local_environment"}:
+                if event_type in {"search_results", "image", "agent_step", "webpage", "local_environment", "computer_result", "computer_screenshot", "computer_approval"}:
                     try:
                         tool_payload = json.loads(delta)
                     except json.JSONDecodeError:
                         tool_payload = {"error": "工具返回数据无法解析."}
-                    if event_type in {"webpage", "local_environment"}:
+                    if event_type in {"webpage", "local_environment", "computer_result"}:
                         # Tool results can be very large JSON objects.  They are
                         # context for the model, not an answer or TTS input.
                         yield sse("thinking", {"text": tool_result_thinking_note(event_type, tool_payload)})

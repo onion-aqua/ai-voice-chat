@@ -12,6 +12,7 @@ export default defineConfig({
       '/api': { target: backend, changeOrigin: true },
       '/media': { target: backend, changeOrigin: true },
       '/generated-images': { target: backend, changeOrigin: true },
+      '/computer-screenshots': { target: backend, changeOrigin: true },
       '/live2dmodels': { target: backend, changeOrigin: true },
     },
     fs: {

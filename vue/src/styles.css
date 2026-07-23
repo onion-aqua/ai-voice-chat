@@ -26,11 +26,14 @@ button:disabled { cursor: not-allowed; opacity: .55; }
   min-height: 0;
   overflow: hidden;
   display: grid;
-  grid-template-columns: 278px minmax(0, 1fr) minmax(280px, 23vw);
+  grid-template-columns: 268px minmax(0, 1fr) clamp(300px, 22vw, 360px);
   grid-template-rows: minmax(0, 1fr);
   color: var(--text);
-  background: var(--page);
+  background: radial-gradient(circle at 52% -20%, var(--brand-soft), transparent 34%), var(--page);
 }
+
+.app-shell.background-plain { background: var(--page); }
+.app-shell.background-mist { background: radial-gradient(circle at 14% 0%, var(--brand-soft), transparent 36%), linear-gradient(135deg, var(--page), var(--surface) 52%, var(--brand-soft)); }
 
 .app-shell.dark {
   --page: #121816;
@@ -52,8 +55,8 @@ button:disabled { cursor: not-allowed; opacity: .55; }
 .icon-button:hover { border-color: var(--brand); color: var(--brand); }
 .sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; }
 
-@media (max-width: 1220px) {
-  .app-shell { grid-template-columns: 250px minmax(0, 1fr) minmax(230px, 25vw); }
+@media (max-width: 1320px) {
+  .app-shell { grid-template-columns: 250px minmax(0, 1fr) 300px; }
 }
 
 @media (max-width: 1000px) {
