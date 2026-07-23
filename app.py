@@ -228,8 +228,9 @@ AUTOMATION_TOOLS = [
 
 
 def load_settings() -> dict:
-    """只读取同目录 config.txt,集中管理 API 和本地运行环境."""
-    path = APP_DIR / "config.txt"
+    """Read the app config, optionally overridden by the Vue launcher."""
+    override = os.environ.get("AI_VOICE_CHAT_CONFIG", "").strip()
+    path = Path(override).expanduser() if override else APP_DIR / "config.txt"
     if not path.is_file():
         raise RuntimeError(f"找不到配置文件:{path}")
     config = configparser.ConfigParser(interpolation=None)
@@ -366,7 +367,7 @@ class SpeechRequest(BaseModel):
     """A replay request for an existing assistant bubble."""
     text: str = Field(min_length=1, max_length=12_000)
     voice: str = Field(min_length=1, max_length=160)
-    speaking_speed: float = Field(default=1.0, ge=0.75, le=1.35)
+    speaking_speed: float = Field(default=1.0, ge=0.75, le=1.5)
 
 
 def resolve_chat_config_from_web(web: WebChatSettings) -> dict:

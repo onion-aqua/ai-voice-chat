@@ -1,0 +1,70 @@
+:root {
+  color: #213a34;
+  background: #f7f8f1;
+  font-family: Inter, "PingFang SC", "Microsoft YaHei", system-ui, sans-serif;
+  font-synthesis: none;
+}
+
+* { box-sizing: border-box; }
+html, body, #app { min-width: 0; height: 100%; margin: 0; }
+body { min-height: 0; overflow: hidden; background: #f7f8f1; }
+button, input, textarea, select { font: inherit; }
+button { cursor: pointer; }
+button:disabled { cursor: not-allowed; opacity: .55; }
+
+.app-shell {
+  --page: #f7f8f1;
+  --surface: #fbfcf8;
+  --surface-soft: #eff3ea;
+  --line: #dce3d6;
+  --text: #213a34;
+  --muted: #73817b;
+  --brand: #2e7a65;
+  --brand-soft: #dfeee6;
+  --danger: #b74b4b;
+  height: 100dvh;
+  min-height: 0;
+  overflow: hidden;
+  display: grid;
+  grid-template-columns: 278px minmax(0, 1fr) minmax(280px, 23vw);
+  grid-template-rows: minmax(0, 1fr);
+  color: var(--text);
+  background: var(--page);
+}
+
+.app-shell.dark {
+  --page: #121816;
+  --surface: #19221e;
+  --surface-soft: #233029;
+  --line: #34463d;
+  --text: #ebf3ee;
+  --muted: #a6b4ab;
+  --brand: #69ba95;
+  --brand-soft: #1c3d2e;
+  --danger: #f18080;
+}
+
+.panel-scroll { min-height: 0; overflow-x: hidden; overflow-y: auto; overscroll-behavior: contain; scrollbar-color: var(--line) transparent; scrollbar-gutter: stable; }
+.icon-button {
+  display: inline-grid; place-items: center; width: 38px; height: 38px; border: 1px solid var(--line);
+  border-radius: 12px; color: var(--text); background: var(--surface); transition: .18s ease;
+}
+.icon-button:hover { border-color: var(--brand); color: var(--brand); }
+.sr-only { position:absolute; width:1px; height:1px; overflow:hidden; clip:rect(0,0,0,0); white-space:nowrap; }
+
+@media (max-width: 1220px) {
+  .app-shell { grid-template-columns: 250px minmax(0, 1fr) minmax(230px, 25vw); }
+}
+
+@media (max-width: 1000px) {
+  .app-shell { grid-template-columns: 244px minmax(0, 1fr); }
+  .live2d-panel { display: none !important; }
+}
+
+@media (max-width: 720px) {
+  .app-shell { display: block; height: 100dvh; min-height: 0; overflow: hidden; }
+  .desktop-sidebar { display: none !important; }
+  .mobile-only { display: inline-grid !important; }
+}
+
+@media (min-width: 721px) { .mobile-only { display: none !important; } }
